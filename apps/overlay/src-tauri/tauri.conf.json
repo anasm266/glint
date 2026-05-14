@@ -16,7 +16,7 @@
         "url": "index.html",
         "title": "overlay-app",
         "width": 380,
-        "height": 52,
+        "height": 60,
         "resizable": false,
         "decorations": false,
         "transparent": true,

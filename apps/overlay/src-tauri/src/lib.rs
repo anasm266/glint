@@ -85,7 +85,7 @@ pub(crate) fn reposition_main(window: &tauri::WebviewWindow, corner: state::Corn
     let scale = monitor.scale_factor();
     let inset = (24.0 * scale) as i32;
     let win_w = (380.0 * scale) as i32;
-    let win_h = (52.0 * scale) as i32;
+    let win_h = (60.0 * scale) as i32;
     let pos = monitor.position();
     let x = match corner {
         state::Corner::Tl | state::Corner::Bl => pos.x + inset,
