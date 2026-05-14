@@ -4,7 +4,7 @@ const DELAY_MS = 120;
 
 let timer: ReturnType<typeof setTimeout> | null = null;
 
-/** Cancel a pending hover collapse (call on dot enter or panel enter). */
+/** Cancel a pending hover collapse (call on pill/panel enter). */
 export function cancelScheduledHoverLeave(): void {
   if (timer !== null) {
     clearTimeout(timer);
@@ -12,11 +12,11 @@ export function cancelScheduledHoverLeave(): void {
   }
 }
 
-/** Debounced collapse when leaving a dot or the hover panel. */
+/** Debounced collapse when leaving the pill row or hover panel. */
 export function scheduleHoverLeaveClear(): void {
   cancelScheduledHoverLeave();
   timer = setTimeout(() => {
     timer = null;
-    useSessions.getState().setHoveredDotId(null);
+    useSessions.getState().setPillPanelHovered(false);
   }, DELAY_MS);
 }
