@@ -1,0 +1,20 @@
+[package]
+name = "overlay-hook"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "overlay-hook"
+path = "src/main.rs"
+
+[dependencies]
+ureq = { version = "2.10", default-features = false, features = ["json"] }
+serde_json = "1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_ToolHelp",
+] }
