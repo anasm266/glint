@@ -1,6 +1,13 @@
 import clsx from "clsx";
 import { motion, AnimatePresence } from "framer-motion";
+import { useEffect, useRef } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import type { SessionDTO, Status } from "../types";
+import {
+  cancelScheduledHoverLeave,
+  scheduleHoverLeaveClear,
+} from "../lib/hoverLeaveDebounce";
+import { useSessions } from "../store/sessions";
 
 const dotColor: Record<Status, string> = {
   idle: "bg-dot-idle",
@@ -9,15 +16,64 @@ const dotColor: Record<Status, string> = {
   errored: "bg-dot-err",
 };
 
+const CLICK_DELAY_MS = 220;
+
 export default function FleetBar({
   sessions,
   primaryId,
+  codexConnected,
 }: {
   sessions: SessionDTO[];
   primaryId?: string;
+  codexConnected?: boolean;
 }) {
+  const pinnedId = useSessions((s) => s.pinnedId);
+  const tempSelectedId = useSessions((s) => s.tempSelectedId);
+  const pin = useSessions((s) => s.pin);
+  const tempSelect = useSessions((s) => s.tempSelect);
+  const setHoveredDotId = useSessions((s) => s.setHoveredDotId);
+
+  const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const visible = sessions.slice(0, 8);
   const overflow = Math.max(0, sessions.length - visible.length);
+
+  const clearClickTimer = () => {
+    if (clickTimerRef.current !== null) {
+      clearTimeout(clickTimerRef.current);
+      clickTimerRef.current = null;
+    }
+  };
+
+  useEffect(
+    () => () => {
+      clearClickTimer();
+      cancelScheduledHoverLeave();
+    },
+    []
+  );
+
+  const onDotEnter = (id: string) => {
+    cancelScheduledHoverLeave();
+    setHoveredDotId(id);
+  };
+
+  const onDotLeave = () => {
+    scheduleHoverLeaveClear();
+  };
+
+  const ringFor = (id: string) => {
+    if (pinnedId === id) {
+      return "ring-2 ring-white/70 ring-offset-0";
+    }
+    if (tempSelectedId === id) {
+      return "ring-1 ring-white/45 ring-offset-0";
+    }
+    if (!pinnedId && !tempSelectedId && id === primaryId) {
+      return "ring-1 ring-white/30 ring-offset-0";
+    }
+    return "";
+  };
 
   return (
     <div className="flex items-center gap-1 shrink-0">
@@ -26,16 +82,35 @@ export default function FleetBar({
           <motion.span
             key={s.id}
             layout
+            role="button"
+            tabIndex={0}
             initial={{ scale: 0.4, opacity: 0 }}
             animate={{ scale: 1, opacity: 1 }}
             exit={{ scale: 0.4, opacity: 0 }}
             transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
             className={clsx(
-              "block h-1.5 w-1.5 rounded-full",
+              "block h-1.5 w-1.5 rounded-full cursor-default",
               dotColor[s.status],
               s.status === "working" && "animate-breathe",
-              s.id === primaryId && "ring-1 ring-white/30 ring-offset-0"
+              ringFor(s.id)
             )}
+            onMouseDown={(e) => e.stopPropagation()}
+            onMouseEnter={() => onDotEnter(s.id)}
+            onMouseLeave={onDotLeave}
+            onClick={(e) => {
+              e.stopPropagation();
+              clearClickTimer();
+              clickTimerRef.current = window.setTimeout(() => {
+                clickTimerRef.current = null;
+                tempSelect(s.id);
+                invoke("focus_session", { id: s.id }).catch(() => {});
+              }, CLICK_DELAY_MS);
+            }}
+            onDoubleClick={(e) => {
+              e.stopPropagation();
+              clearClickTimer();
+              pin(s.id);
+            }}
           />
         ))}
       </AnimatePresence>
@@ -44,6 +119,29 @@ export default function FleetBar({
           +{overflow}
         </span>
       )}
+      <AnimatePresence initial={false}>
+        {!codexConnected && (
+          <motion.span
+            key="disconnected"
+            layout
+            initial={{ scale: 0.4, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            exit={{ scale: 0.4, opacity: 0 }}
+            transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+            title="Codex hooks not installed — click to open Settings"
+            className={clsx(
+              "block h-1.5 w-1.5 shrink-0 rounded-full",
+              "ring-1 ring-amber-400/55",
+              sessions.length > 0 && "ml-0.5"
+            )}
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              invoke("open_settings").catch(() => {});
+            }}
+          />
+        )}
+      </AnimatePresence>
     </div>
   );
 }
