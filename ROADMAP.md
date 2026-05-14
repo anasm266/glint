@@ -4,30 +4,62 @@ Near-term polish for the Codex-only build, before Cursor support. Items are orde
 
 ---
 
-## 1. Fleet bar: expire finished sessions after focus
+## 1. Compact strip: fleet bar + primary line (full target)
 
-**Problem**  
-When a session reaches **Done** and you acknowledge it (click the overlay to focus Codex), the corresponding dot stays in the fleet bar until you restart the app. With several parallel agents, the bar fills with stale dots.
+This section records the **intended** UX for the always-visible pill. Today's build only implements a subset; the rest is polish / v0.2.
 
-**Desired behavior**
+### Fleet bar (left)
 
-- Up to **5** dots remain the cap (already the UI target).
-- When **all visible sessions are Done**, clicking the overlay (on any “done” state / primary line) should:
-  1. Focus the Codex window (existing behavior).
-  2. Mark that session as fully dismissed for the fleet bar.
-  3. **Remove its dot** with a short, smooth animation (about **5–10 seconds** after the click — not instant, so accidental clicks do not flash away; tune in implementation).
-- If some sessions are still **working**, dots for finished ones can either stay until everything is done, or use a simpler rule: dismiss only the primary session’s dot after focus — product decision when implementing; default suggestion: dismiss **all Done + acknowledged** sessions after a successful focus, each dot animating out over ~300–500ms staggered, with the bar shrinking when empty.
+- One **small dot per active session**, colored by state so you can read "3 working, 1 done, 1 errored" at a glance.
+- Size the strip so **about 5–8** sessions fit comfortably in the dot row.
+- If there are more sessions than fit, collapse the overflow to **`●●● +4`** (a few dots + count of hidden ones).
+
+### Fleet bar dots — interactive
+
+Dots are not just indicators; they are the primary navigation control for multi-session workflows.
+
+- **Single click** a dot → switches the primary line to show that session's info and focuses its Codex window. Selection is **temporary**: auto-priority resumes once that session ends or the user clicks outside the overlay.
+- **Double click** a dot → **pins** that session as primary until it ends or the user double-clicks it again to unpin. A subtle ring around the pinned dot shows which session is locked.
+- **Hover** a dot → the expanded panel opens anchored to that specific session, not the auto-priority primary.
+
+### Primary line (right)
+
+When **nothing is pinned**, the primary line auto-selects whichever session is most interesting right now using this priority (first match wins):
+
+1. Any session in an **attention** state (error / stall / loop / dangerous command when those exist).
+2. Any session that is **Done but not yet acknowledged**.
+3. **Most recently active** session (by last hook / activity).
+
+When a dot is **pinned** (double-clicked), the primary line is locked to that session regardless of priority until unpinned or the session ends.
+
+### Done queue
+
+- If **multiple** sessions finish before any are acknowledged, the primary line shows the most recent completion and a count, e.g. **`✓ 3 done`**.
+- **Single-clicking** a done dot focuses that session's Codex window and marks it acknowledged, surfacing the next unacked done session in the primary line (queue advances).
+
+### Ack-to-dismiss
+
+- A session's "Done, pending review" state is cleared when the user **focuses its Codex window** — via single-clicking its dot, or via the OS (manually switching to Codex).
+- Until acknowledged, Done stays visually distinct (green dot / tint) so nothing gets silently missed.
+
+### Fleet bar: expire finished sessions after focus
+
+After Done + acknowledge, the dot should leave the fleet bar cleanly.
+
+- Remove acknowledged dots with a **smooth staggered animation** (~300–500ms each), bar shrinks when empty.
+- A short **5–10 second delay** after the acknowledging click before removal prevents accidental disappearance on stray clicks (tunable).
+- If some sessions are still working, finished dots can disappear on ack independently — no need to wait for the full fleet to be idle.
 
 **Technical notes**
 
-- Today `acknowledged_done` is set on focus in `focus_session`; the UI still lists the session. Need a **third state** or filter: “done, acknowledged, and removed from fleet” after animation completes, or remove from `SessionStore` after delay.
+- Today `acknowledged_done` is set on focus in `focus_session`; the UI still lists the session. Need a **third state**: "done, acknowledged, pending removal" — remove from `SessionStore` after the animation delay.
 - Framer Motion already used in fleet bar — reuse for exit transitions.
 
 ---
 
 ## 2. Persist window position (corner)
 
-**Problem**  
+**Problem**
 Corner choice (TL / TR / BL / BR) resets when the app restarts.
 
 **Desired behavior**
@@ -44,7 +76,7 @@ Corner choice (TL / TR / BL / BR) resets when the app restarts.
 
 ## 3. Wire opacity slider to the overlay
 
-**Problem**  
+**Problem**
 Settings exposes an opacity slider; the value is stored in memory but does not affect the pill or window.
 
 **Desired behavior**
@@ -63,14 +95,14 @@ Settings exposes an opacity slider; the value is stored in memory but does not a
 
 ## 4. Stall detection
 
-**Problem**  
-In full-auto Codex mode, long gaps with no hook events can mean “still thinking / big edit” or “stuck.” The compact row should surface ambiguity without crying wolf.
+**Problem**
+In full-auto Codex mode, long gaps with no hook events can mean "still thinking / big edit" or "stuck." The compact row should surface ambiguity without crying wolf.
 
 **Desired behavior**
 
-- If **no hook events** for **3 minutes** while status is still “working,” treat as **stale / possible stall**:
-  - Amber pulse on that session’s dot (or primary line tint).
-  - Copy along the lines of **“Idle 3m”** or **“No activity for 3m”** — keep it neutral; color does the “look here” work.
+- If **no hook events** for **3 minutes** while status is still "working," treat as stale / possible stall:
+  - Amber pulse on that session's dot (or primary line tint).
+  - Copy along the lines of **"Idle 3m"** or **"No activity for 3m"** — keep it neutral; color does the "look here" work.
 - Reset the stall timer on any event.
 
 **Technical notes**
@@ -82,13 +114,13 @@ In full-auto Codex mode, long gaps with no hook events can mean “still thinkin
 
 ## 5. Settings window chrome (preferred: borderless dark)
 
-**Problem**  
-Settings uses native **decorated** window + dark web content → light system title bar clashes with the rest of the UI.
+**Problem**
+Settings uses native decorated window + dark web content → light system title bar clashes with the rest of the UI.
 
 **Desired behavior** (preferred)
 
 - **Borderless** settings window aligned with the main overlay: dark surface, rounded corners, `data-tauri-drag-region` on header, custom close button, same translucency language as the pill.
-- Optional: **traffic-light** style close only to keep scope small.
+- Optional: traffic-light style close only to keep scope small.
 
 **Alternative** (if borderless is painful on Windows)
 
