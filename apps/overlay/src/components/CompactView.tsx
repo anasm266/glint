@@ -7,6 +7,10 @@ import {
 import clsx from "clsx";
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect } from "react";
+import {
+  cancelScheduledHoverLeave,
+  scheduleHoverLeaveClear,
+} from "../lib/hoverLeaveDebounce";
 import { useSessions } from "../store/sessions";
 import type { SettingsDTO } from "../types";
 import FleetBar from "./FleetBar";
@@ -25,7 +29,8 @@ export default function CompactView() {
   const sessions = useSessions((s) => s.sessions);
   const corner = useSessions((s) => s.corner);
   const codexConnected = useSessions((s) => s.codexConnected);
-  const hoveredDotId = useSessions((s) => s.hoveredDotId);
+  const pillPanelHovered = useSessions((s) => s.pillPanelHovered);
+  const setPillPanelHovered = useSessions((s) => s.setPillPanelHovered);
   const clearTempSelect = useSessions((s) => s.clearTempSelect);
   const setCorner = useSessions((s) => s.setCorner);
   const setCodexConnected = useSessions((s) => s.setCodexConnected);
@@ -37,10 +42,8 @@ export default function CompactView() {
         .length
   );
 
-  const hoveredSession =
-    hoveredDotId === null
-      ? null
-      : (sessions.find((x) => x.id === hoveredDotId) ?? null);
+  const panelSession =
+    pillPanelHovered && primary !== undefined ? primary : null;
 
   const bottom = corner === "bl" || corner === "br";
 
@@ -70,7 +73,7 @@ export default function CompactView() {
   }, [clearTempSelect, setCorner, setCodexConnected]);
 
   useEffect(() => {
-    const expanded = hoveredDotId !== null;
+    const expanded = pillPanelHovered && primary !== undefined;
     const bottomCorner = corner === "bl" || corner === "br";
     const dyLogical = H_EXPANDED - H_COLLAPSED;
 
@@ -96,7 +99,7 @@ export default function CompactView() {
     };
 
     void run().catch(() => {});
-  }, [hoveredDotId, corner]);
+  }, [pillPanelHovered, primary?.id, corner]);
 
   const tint =
     primary?.status === "errored"
@@ -105,10 +108,8 @@ export default function CompactView() {
         ? "bg-emerald-500/[0.05]"
         : "";
 
-  const onOuterClick = () => {
+  const onPillClick = () => {
     clearTempSelect();
-    if (!primary) return;
-    invoke("focus_session", { id: primary.id }).catch(() => {});
   };
 
   const pillRow = (
@@ -118,8 +119,14 @@ export default function CompactView() {
         "surface flex h-9 w-full shrink-0 items-center gap-3 px-3 transition-colors duration-220 ease-out cursor-default select-none",
         tint
       )}
-      onClick={onOuterClick}
-      onDoubleClick={onOuterClick}
+      onMouseEnter={() => {
+        cancelScheduledHoverLeave();
+        setPillPanelHovered(true);
+      }}
+      onMouseLeave={() => {
+        scheduleHoverLeaveClear();
+      }}
+      onClick={onPillClick}
     >
       <FleetBar
         sessions={sessions}
@@ -182,13 +189,13 @@ export default function CompactView() {
     >
       {bottom ? (
         <>
-          <HoverPanel session={hoveredSession} corner={corner} />
+          <HoverPanel session={panelSession} corner={corner} />
           {pillRow}
         </>
       ) : (
         <>
           {pillRow}
-          <HoverPanel session={hoveredSession} corner={corner} />
+          <HoverPanel session={panelSession} corner={corner} />
         </>
       )}
     </div>

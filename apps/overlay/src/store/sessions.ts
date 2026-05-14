@@ -27,16 +27,15 @@ interface SessionsState {
   sessions: SessionDTO[];
   corner: Corner;
   codexConnected: boolean;
-  pinnedId: string | null;
   tempSelectedId: string | null;
-  hoveredDotId: string | null;
+  /** True while pointer is over the pill row or hover panel (debounced leave). */
+  pillPanelHovered: boolean;
   setSessions: (s: SessionDTO[]) => void;
   setCorner: (c: Corner) => void;
   setCodexConnected: (v: boolean) => void;
-  pin: (id: string) => void;
   tempSelect: (id: string) => void;
   clearTempSelect: () => void;
-  setHoveredDotId: (id: string | null) => void;
+  setPillPanelHovered: (v: boolean) => void;
   primary: () => SessionDTO | undefined;
   doneQueueCount: () => number;
 }
@@ -45,16 +44,14 @@ export const useSessions = create<SessionsState>((set, get) => ({
   sessions: [],
   corner: "tr",
   codexConnected: false,
-  pinnedId: null,
   tempSelectedId: null,
-  hoveredDotId: null,
+  pillPanelHovered: false,
 
   setCorner: (corner) => set({ corner }),
   setCodexConnected: (codexConnected) => set({ codexConnected }),
 
   setSessions: (next) => {
     const prev = get().sessions;
-    const prevPinned = get().pinnedId;
     const prevTemp = get().tempSelectedId;
 
     for (const s of next) {
@@ -76,40 +73,24 @@ export const useSessions = create<SessionsState>((set, get) => ({
       }
     }
 
-    let pinnedId = prevPinned;
     let tempSelectedId = prevTemp;
-    if (pinnedId && !nextIds.has(pinnedId)) pinnedId = null;
     if (tempSelectedId && !nextIds.has(tempSelectedId)) tempSelectedId = null;
 
-    set({ sessions: next, pinnedId, tempSelectedId });
+    set({ sessions: next, tempSelectedId });
   },
-
-  pin: (id) =>
-    set((state) => {
-      const nextPin = state.pinnedId === id ? null : id;
-      return {
-        pinnedId: nextPin,
-        tempSelectedId: nextPin ? null : state.tempSelectedId,
-      };
-    }),
 
   tempSelect: (id) => set({ tempSelectedId: id }),
 
   clearTempSelect: () => set({ tempSelectedId: null }),
 
-  setHoveredDotId: (hoveredDotId) => set({ hoveredDotId }),
+  setPillPanelHovered: (pillPanelHovered) => set({ pillPanelHovered }),
 
   primary: () => {
-    const { sessions, pinnedId, tempSelectedId } = get();
+    const { sessions, tempSelectedId } = get();
     if (sessions.length === 0) return undefined;
 
     const byId = (id: string | null | undefined) =>
       id ? sessions.find((x) => x.id === id) : undefined;
-
-    if (pinnedId) {
-      const p = byId(pinnedId);
-      if (p) return p;
-    }
 
     if (tempSelectedId) {
       const t = byId(tempSelectedId);

@@ -1,4 +1,5 @@
 import clsx from "clsx";
+import { invoke } from "@tauri-apps/api/core";
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useState } from "react";
 import type { Corner, SessionDTO } from "../types";
@@ -45,7 +46,7 @@ export default function HoverPanel({
   const bottom = corner === "bl" || corner === "br";
   const [now, setNow] = useState(() => Date.now());
   const [clockMode, setClockMode] = useState(false);
-  const setHoveredDotId = useSessions((s) => s.setHoveredDotId);
+  const setPillPanelHovered = useSessions((s) => s.setPillPanelHovered);
 
   useEffect(() => {
     const id = window.setInterval(() => setNow(Date.now()), 1000);
@@ -78,7 +79,7 @@ export default function HoverPanel({
             )}
             onMouseEnter={() => {
               cancelScheduledHoverLeave();
-              setHoveredDotId(session.id);
+              setPillPanelHovered(true);
             }}
             onMouseLeave={() => {
               scheduleHoverLeaveClear();
@@ -101,6 +102,35 @@ export default function HoverPanel({
                   session.status === "idle" && "bg-dot-idle"
                 )}
               />
+            </div>
+
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <button
+                type="button"
+                className="rounded px-2 py-0.5 text-[11px] text-white/50 transition-colors duration-150 ease-out hover:bg-white/[0.06] hover:text-white/80"
+                title="Bring the Codex app window to the front"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  invoke("open_codex", { id: session.id }).catch(() => {});
+                }}
+              >
+                Open Codex
+              </button>
+              {session.status === "done" && !session.acknowledgedDone ? (
+                <button
+                  type="button"
+                  className="rounded px-2 py-0.5 text-[11px] text-emerald-400/70 transition-colors duration-150 ease-out hover:bg-emerald-500/10 hover:text-emerald-300/90"
+                  title="Acknowledge without switching apps"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    invoke("acknowledge_done", { id: session.id }).catch(
+                      () => {}
+                    );
+                  }}
+                >
+                  Dismiss
+                </button>
+              ) : null}
             </div>
 
             <AnimatePresence initial={false}>

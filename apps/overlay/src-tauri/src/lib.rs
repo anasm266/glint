@@ -40,7 +40,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_sessions,
             commands::remove_session,
-            commands::focus_session,
+            commands::open_codex,
+            commands::acknowledge_done,
             commands::install_codex_hooks,
             commands::remove_codex_hooks,
             commands::is_codex_connected,

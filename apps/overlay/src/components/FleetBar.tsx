@@ -1,12 +1,9 @@
 import clsx from "clsx";
 import { motion, AnimatePresence } from "framer-motion";
-import { useEffect, useRef } from "react";
+import { useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { SessionDTO, Status } from "../types";
-import {
-  cancelScheduledHoverLeave,
-  scheduleHoverLeaveClear,
-} from "../lib/hoverLeaveDebounce";
+import { cancelScheduledHoverLeave } from "../lib/hoverLeaveDebounce";
 import { useSessions } from "../store/sessions";
 
 const dotColor: Record<Status, string> = {
@@ -15,8 +12,6 @@ const dotColor: Record<Status, string> = {
   done: "bg-dot-done",
   errored: "bg-dot-err",
 };
-
-const CLICK_DELAY_MS = 220;
 
 export default function FleetBar({
   sessions,
@@ -27,49 +22,24 @@ export default function FleetBar({
   primaryId?: string;
   codexConnected?: boolean;
 }) {
-  const pinnedId = useSessions((s) => s.pinnedId);
   const tempSelectedId = useSessions((s) => s.tempSelectedId);
-  const pin = useSessions((s) => s.pin);
   const tempSelect = useSessions((s) => s.tempSelect);
-  const setHoveredDotId = useSessions((s) => s.setHoveredDotId);
-
-  const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const visible = sessions.slice(0, 8);
-  const overflow = Math.max(0, sessions.length - visible.length);
-
-  const clearClickTimer = () => {
-    if (clickTimerRef.current !== null) {
-      clearTimeout(clickTimerRef.current);
-      clickTimerRef.current = null;
-    }
-  };
 
   useEffect(
     () => () => {
-      clearClickTimer();
       cancelScheduledHoverLeave();
     },
     []
   );
 
-  const onDotEnter = (id: string) => {
-    cancelScheduledHoverLeave();
-    setHoveredDotId(id);
-  };
-
-  const onDotLeave = () => {
-    scheduleHoverLeaveClear();
-  };
+  const visible = sessions.slice(0, 8);
+  const overflow = Math.max(0, sessions.length - visible.length);
 
   const ringFor = (id: string) => {
-    if (pinnedId === id) {
-      return "ring-2 ring-white/70 ring-offset-0";
-    }
     if (tempSelectedId === id) {
-      return "ring-1 ring-white/45 ring-offset-0";
+      return "ring-2 ring-white/55 ring-offset-0";
     }
-    if (!pinnedId && !tempSelectedId && id === primaryId) {
+    if (!tempSelectedId && id === primaryId) {
       return "ring-1 ring-white/30 ring-offset-0";
     }
     return "";
@@ -95,21 +65,9 @@ export default function FleetBar({
               ringFor(s.id)
             )}
             onMouseDown={(e) => e.stopPropagation()}
-            onMouseEnter={() => onDotEnter(s.id)}
-            onMouseLeave={onDotLeave}
             onClick={(e) => {
               e.stopPropagation();
-              clearClickTimer();
-              clickTimerRef.current = window.setTimeout(() => {
-                clickTimerRef.current = null;
-                tempSelect(s.id);
-                invoke("focus_session", { id: s.id }).catch(() => {});
-              }, CLICK_DELAY_MS);
-            }}
-            onDoubleClick={(e) => {
-              e.stopPropagation();
-              clearClickTimer();
-              pin(s.id);
+              tempSelect(s.id);
             }}
           />
         ))}

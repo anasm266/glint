@@ -22,28 +22,48 @@ pub fn remove_session(id: String, state: State<'_, SharedState>, app: AppHandle)
 }
 
 #[tauri::command]
-pub fn focus_session(
-    id: String,
+pub fn open_codex(
+    id: Option<String>,
     state: State<'_, SharedState>,
-    app: AppHandle,
 ) -> Result<bool, String> {
     let parent_pid = state.with_sessions(|m| {
-        m.get_mut(&id).and_then(|s| {
-            // Only "done pending review" is acknowledged on focus. Working
-            // sessions must keep acknowledged_done false so the UI does not
-            // treat a focus click as dismissing a completed run.
-            if s.status == Status::Done {
-                s.acknowledged_done = true;
+        if let Some(ref sid) = id {
+            m.get(sid).and_then(|s| s.parent_pid)
+        } else {
+            let mut best: Option<(u64, u32)> = None;
+            for s in m.values() {
+                if let Some(pid) = s.parent_pid {
+                    let t = s.last_event_at_ms;
+                    if best.as_ref().map(|(bt, _)| t > *bt).unwrap_or(true) {
+                        best = Some((t, pid));
+                    }
+                }
             }
-            s.parent_pid
-        })
+            best.map(|(_, p)| p)
+        }
     });
-    state.emit_snapshot(&app);
     let Some(pid) = parent_pid else {
         return Ok(false);
     };
     let target = win::root_codex_pid(pid).unwrap_or(pid);
     Ok(win::focus_pid(target))
+}
+
+#[tauri::command]
+pub fn acknowledge_done(
+    id: String,
+    state: State<'_, SharedState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    state.with_sessions(|m| {
+        if let Some(s) = m.get_mut(&id) {
+            if s.status == Status::Done {
+                s.acknowledged_done = true;
+            }
+        }
+    });
+    state.emit_snapshot(&app);
+    Ok(())
 }
 
 #[tauri::command]
