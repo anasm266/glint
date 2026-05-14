@@ -252,7 +252,7 @@ fn describe_pre_tool(p: &serde_json::Value) -> String {
             if cmd.is_empty() {
                 "Running command".to_string()
             } else {
-                format!("Running: {}", truncate(cmd, 64))
+                describe_bash(cmd)
             }
         }
         "apply_patch" => {
@@ -342,6 +342,400 @@ fn humanize_tool(name: &str) -> String {
     }
     name.to_string()
 }
+
+// ── Bash command summarizer ──────────────────────────────────────────────────
+//
+// Two-phase, zero-regex approach. Phase 1 strips shell noise (PowerShell
+// preambles, `cd X &&` prefixes, interpreter wrappers) returning a slice into
+// the original string. Phase 2 matches the first real token against a static
+// table. All sub-classifiers return &'static str so the only allocation is the
+// single format! call that may occur at the call site.
+
+fn describe_bash(raw: &str) -> String {
+    let cmd = strip_shell_noise(raw);
+    classify_bash(cmd)
+}
+
+/// Strip PowerShell preamble, `cd X &&` prefixes and interpreter wrappers.
+/// Returns a sub-slice of `raw` — no allocation.
+fn strip_shell_noise(raw: &str) -> &str {
+    let mut s = raw.trim();
+
+    // 1. Split on `;` and skip pure assignment segments (PowerShell preamble).
+    //    e.g. `$ErrorActionPreference='Stop'; $x = ...; actual-command`
+    let mut last_non_assign: &str = s;
+    for segment in s.split(';') {
+        let seg = segment.trim();
+        if seg.is_empty() {
+            continue;
+        }
+        // A segment is a pure assignment if it starts with `$` and contains `=`
+        // before any whitespace, or is a simple `set KEY=VALUE` style.
+        let is_assignment = (seg.starts_with('$') && {
+            let up_to_eq = seg.find('=').unwrap_or(0);
+            let up_to_sp = seg.find(char::is_whitespace).unwrap_or(usize::MAX);
+            up_to_eq > 0 && up_to_eq <= up_to_sp
+        }) || seg.starts_with("set ") && seg.contains('=');
+        if !is_assignment {
+            last_non_assign = seg;
+            break;
+        }
+    }
+    s = last_non_assign;
+
+    // 2. `cd X && cmd` — take after `&&`.
+    if s.starts_with("cd ") {
+        if let Some(pos) = s.find(" && ") {
+            s = s[pos + 4..].trim();
+        }
+    }
+
+    // 3. `timeout N cmd` — skip the verb and numeric arg.
+    if s.starts_with("timeout ") {
+        let mut parts = s.splitn(3, char::is_whitespace);
+        parts.next(); // "timeout"
+        parts.next(); // the number
+        if let Some(rest) = parts.next() {
+            s = rest.trim();
+        }
+    }
+
+    // 4. Interpreter wrappers: `bash -c 'inner'`, `powershell -Command "inner"`.
+    let verb = s.split_whitespace().next().unwrap_or("");
+    if matches!(verb, "bash" | "sh" | "zsh" | "powershell" | "pwsh") {
+        // Look for `-c` or `-Command` followed by a quoted string.
+        if let Some(pos) = s.find(" -c ").or_else(|| s.find(" -Command ")) {
+            let after = s[pos..].splitn(3, char::is_whitespace).nth(2).unwrap_or("").trim();
+            let inner = after
+                .strip_prefix('"')
+                .and_then(|x| x.strip_suffix('"'))
+                .or_else(|| after.strip_prefix('\'').and_then(|x| x.strip_suffix('\'')))
+                .unwrap_or(after);
+            if !inner.is_empty() {
+                s = inner;
+            }
+        }
+    }
+
+    s.trim()
+}
+
+/// Classify a noise-stripped command into a human label.
+fn classify_bash(cmd: &str) -> String {
+    let mut tokens = cmd.split_whitespace();
+    let verb = match tokens.next() {
+        Some(v) => v,
+        None => return "Running command".to_string(),
+    };
+    // Lowercase the verb for case-insensitive matching (PowerShell uses
+    // PascalCase aliases). Allocates only a tiny stack string for the verb.
+    let verb_lc = verb.to_ascii_lowercase();
+    let verb_lc = verb_lc.as_str();
+
+    // Collect remaining tokens once; sub-classifiers borrow slices.
+    let rest = cmd[verb.len()..].trim();
+
+    match verb_lc {
+        // ── Direct test runners ─────────────────────────────────────────────
+        "pytest" | "py.test" => "Running Python tests".to_string(),
+        "jest" | "vitest" | "mocha" | "jasmine" | "ava" => "Running JS tests".to_string(),
+        "rspec" => "Running Ruby tests".to_string(),
+        "phpunit" => "Running PHP tests".to_string(),
+
+        // ── Package managers / build tools ──────────────────────────────────
+        "npm" | "yarn" | "pnpm" | "bun" => classify_npm(rest),
+        "npx" | "bunx" => {
+            let target = rest.split_whitespace().find(|t| !t.starts_with('-')).unwrap_or(rest);
+            format!("Running: {}", basename(target))
+        }
+        "cargo" => classify_cargo(first_non_flag(rest)),
+        "go" => classify_go(first_non_flag(rest)),
+        "dotnet" => classify_dotnet(first_non_flag(rest)),
+        "make" | "cmake" | "ninja" => "Building".to_string(),
+        "msbuild" => "Building .NET".to_string(),
+        "gradle" | "mvn" | "ant" => "Building".to_string(),
+
+        // ── Python ──────────────────────────────────────────────────────────
+        "python" | "python3" | "py" => classify_python(rest),
+
+        // ── Node / TypeScript ───────────────────────────────────────────────
+        "node" | "ts-node" | "tsx" | "deno" => classify_node(rest),
+
+        // ── Shell scripts ───────────────────────────────────────────────────
+        "bash" | "sh" | "zsh" | "fish" => classify_script(rest),
+        "powershell" | "pwsh" => classify_script(rest),
+
+        // ── Git ─────────────────────────────────────────────────────────────
+        "git" => classify_git(first_non_flag(rest)),
+
+        // ── File reading ────────────────────────────────────────────────────
+        "cat" | "type" | "get-content" | "gc" | "head" | "tail" | "less" | "more" => {
+            let target = first_non_flag(rest);
+            if looks_like_path(target) {
+                format!("Reading: {}", basename(target))
+            } else {
+                "Reading file".to_string()
+            }
+        }
+
+        // ── Directory listing ───────────────────────────────────────────────
+        "ls" | "dir" | "get-childitem" | "gci" | "exa" | "lsd" => {
+            "Listing directory".to_string()
+        }
+
+        // ── Search ──────────────────────────────────────────────────────────
+        "grep" | "rg" | "ripgrep" | "ag" | "ack" | "fgrep" | "egrep" => {
+            "Searching code".to_string()
+        }
+        "find" => "Searching files".to_string(),
+
+        // ── File manipulation ───────────────────────────────────────────────
+        "mkdir" | "md" | "new-item" => "Creating directory".to_string(),
+        "rm" | "del" | "remove-item" | "ri" => "Removing files".to_string(),
+        "cp" | "copy" | "copy-item" => "Copying files".to_string(),
+        "mv" | "move" | "move-item" => "Moving files".to_string(),
+        "touch" | "new-file" => "Creating file".to_string(),
+        "chmod" | "chown" | "attrib" => "Setting permissions".to_string(),
+        "rename" | "ren" => "Renaming file".to_string(),
+
+        // ── Linting / formatting ─────────────────────────────────────────────
+        "eslint" | "tslint" | "oxlint" => "Linting JS".to_string(),
+        "prettier" => "Formatting code".to_string(),
+        "black" | "ruff" | "autopep8" | "isort" => "Formatting Python".to_string(),
+        "flake8" | "pylint" | "bandit" => "Linting Python".to_string(),
+        "mypy" | "pyright" | "pytype" => "Type checking".to_string(),
+        "tsc" => {
+            if rest.contains("--noEmit") || rest.contains("--check") {
+                "Type checking".to_string()
+            } else {
+                "Compiling TypeScript".to_string()
+            }
+        }
+        "cargo-fmt" | "gofmt" | "rustfmt" => "Formatting code".to_string(),
+
+        // ── Package install ──────────────────────────────────────────────────
+        "pip" | "pip3" | "poetry" | "uv" | "pipenv" | "conda" => classify_pip(rest),
+
+        // ── Docker / containers ──────────────────────────────────────────────
+        "docker" => classify_docker(first_non_flag(rest)),
+        "docker-compose" | "podman" | "kubectl" => "Container operation".to_string(),
+
+        // ── Network ──────────────────────────────────────────────────────────
+        "curl" | "wget" | "http" | "httpie" => "Fetching URL".to_string(),
+        "ping" => "Checking connectivity".to_string(),
+
+        // ── Environment / process inspection ─────────────────────────────────
+        "which" | "where" | "command" => "Checking tool availability".to_string(),
+        "env" | "printenv" | "set" => "Checking environment".to_string(),
+        "ps" | "top" | "htop" | "tasklist" => "Checking processes".to_string(),
+        "kill" | "taskkill" | "stop-process" => "Stopping process".to_string(),
+
+        // ── Noise (silent) ───────────────────────────────────────────────────
+        // echo/printf alone are not meaningful actions; keep the previous label.
+        "echo" | "printf" | "write-output" | "write-host" => {
+            "Running command".to_string()
+        }
+
+        // ── Fallback: show just the verb, not the full raw command ────────────
+        _ => {
+            // If the verb looks like a script path, describe it as such.
+            if verb.ends_with(".sh") || verb.ends_with(".ps1") || verb.ends_with(".py") || verb.starts_with("./") || verb.starts_with(".\\") {
+                format!("Running script: {}", basename(verb))
+            } else {
+                format!("Running: {}", truncate(verb, 32))
+            }
+        }
+    }
+}
+
+fn classify_npm(rest: &str) -> String {
+    let sub = first_non_flag(rest);
+    match sub {
+        "test" => "Running tests".to_string(),
+        "build" => "Building".to_string(),
+        "install" | "i" | "ci" | "add" => "Installing dependencies".to_string(),
+        "start" => "Starting server".to_string(),
+        "publish" => "Publishing package".to_string(),
+        "lint" => "Linting".to_string(),
+        "run" => {
+            // `npm run <script>` — the script name is the meaningful bit.
+            let script = rest.split_whitespace()
+                .skip_while(|t| t.starts_with('-') || *t == "run")
+                .next()
+                .unwrap_or("");
+            match script {
+                "dev" | "start" | "serve" | "preview" => "Starting dev server".to_string(),
+                "build" => "Building".to_string(),
+                "test" | "jest" | "vitest" => "Running tests".to_string(),
+                "lint" | "check" => "Linting".to_string(),
+                "format" | "fmt" | "prettier" => "Formatting code".to_string(),
+                "typecheck" | "type-check" | "tsc" | "ts" => "Type checking".to_string(),
+                "migrate" | "db:migrate" | "migration" => "Running migration".to_string(),
+                "seed" | "db:seed" => "Seeding database".to_string(),
+                "storybook" => "Starting Storybook".to_string(),
+                "" => "Running npm".to_string(),
+                name => format!("Running: {}", truncate(name, 24)),
+            }
+        }
+        _ => "Running npm".to_string(),
+    }
+}
+
+fn classify_cargo(sub: &str) -> String {
+    match sub {
+        "test" => "Running tests".to_string(),
+        "build" | "b" => "Building with Cargo".to_string(),
+        "run" | "r" => "Running Rust binary".to_string(),
+        "check" | "c" => "Checking Rust code".to_string(),
+        "clippy" => "Linting Rust code".to_string(),
+        "fmt" => "Formatting Rust code".to_string(),
+        "doc" => "Generating docs".to_string(),
+        "publish" => "Publishing crate".to_string(),
+        "install" => "Installing Rust binary".to_string(),
+        "bench" => "Running benchmarks".to_string(),
+        _ => "Running Cargo".to_string(),
+    }
+}
+
+fn classify_go(sub: &str) -> String {
+    match sub {
+        "test" => "Running Go tests".to_string(),
+        "build" => "Building Go binary".to_string(),
+        "run" => "Running Go program".to_string(),
+        "fmt" => "Formatting Go code".to_string(),
+        "vet" => "Checking Go code".to_string(),
+        "get" | "install" => "Installing Go package".to_string(),
+        "mod" => "Managing Go modules".to_string(),
+        _ => "Running Go".to_string(),
+    }
+}
+
+fn classify_dotnet(sub: &str) -> String {
+    match sub {
+        "test" => "Running tests".to_string(),
+        "build" => "Building .NET".to_string(),
+        "run" => "Running .NET app".to_string(),
+        "publish" => "Publishing .NET".to_string(),
+        "restore" => "Restoring packages".to_string(),
+        "format" => "Formatting .NET code".to_string(),
+        _ => "Running dotnet".to_string(),
+    }
+}
+
+fn classify_python(rest: &str) -> String {
+    let mut tokens = rest.split_whitespace();
+    let arg1 = tokens.next().unwrap_or("");
+    let arg2 = tokens.next().unwrap_or("");
+    match arg1 {
+        "-m" => match arg2 {
+            "pytest" | "unittest" | "nose" | "nose2" => "Running Python tests".to_string(),
+            "pip" => classify_pip(tokens.next().unwrap_or("")),
+            "http.server" | "SimpleHTTPServer" => "Starting HTTP server".to_string(),
+            "black" | "ruff" => "Formatting Python".to_string(),
+            "mypy" | "pyright" => "Type checking".to_string(),
+            name => format!("Running: {}", truncate(name, 24)),
+        },
+        "-c" => "Running inline script".to_string(),
+        a if a.ends_with(".py") => format!("Running: {}", basename(a)),
+        _ => "Running Python".to_string(),
+    }
+}
+
+fn classify_node(rest: &str) -> String {
+    let arg = first_non_flag(rest);
+    if arg.ends_with(".js") || arg.ends_with(".ts") || arg.ends_with(".mjs") || arg.ends_with(".cjs") {
+        format!("Running: {}", basename(arg))
+    } else if arg == "-e" || arg == "--eval" {
+        "Running inline script".to_string()
+    } else {
+        "Running Node".to_string()
+    }
+}
+
+fn classify_script(rest: &str) -> String {
+    let arg = first_non_flag(rest);
+    if arg.ends_with(".sh") {
+        format!("Running script: {}", basename(arg))
+    } else if arg.ends_with(".ps1") {
+        format!("Running script: {}", basename(arg))
+    } else if arg.ends_with(".py") {
+        format!("Running: {}", basename(arg))
+    } else if arg == "-c" || arg == "-Command" || arg == "-command" {
+        "Running command".to_string()
+    } else {
+        "Running script".to_string()
+    }
+}
+
+fn classify_git(sub: &str) -> String {
+    match sub {
+        "status" | "diff" | "log" | "show" | "blame" | "shortlog" => {
+            "Checking git state".to_string()
+        }
+        "add" | "commit" => "Committing changes".to_string(),
+        "push" => "Pushing to remote".to_string(),
+        "pull" | "fetch" => "Fetching from remote".to_string(),
+        "clone" => "Cloning repository".to_string(),
+        "checkout" | "switch" => "Switching branch".to_string(),
+        "merge" | "rebase" | "cherry-pick" => "Merging branches".to_string(),
+        "stash" => "Stashing changes".to_string(),
+        "reset" | "revert" => "Undoing changes".to_string(),
+        "tag" => "Tagging commit".to_string(),
+        "remote" => "Managing remotes".to_string(),
+        _ => "Git operation".to_string(),
+    }
+}
+
+fn classify_pip(rest: &str) -> String {
+    let sub = first_non_flag(rest);
+    match sub {
+        "install" => "Installing dependencies".to_string(),
+        "uninstall" => "Removing package".to_string(),
+        "freeze" | "list" => "Listing packages".to_string(),
+        "show" => "Checking package info".to_string(),
+        _ => "Running pip".to_string(),
+    }
+}
+
+fn classify_docker(sub: &str) -> String {
+    match sub {
+        "build" => "Building Docker image".to_string(),
+        "run" => "Running container".to_string(),
+        "ps" => "Listing containers".to_string(),
+        "pull" => "Pulling image".to_string(),
+        "push" => "Pushing image".to_string(),
+        "exec" => "Running in container".to_string(),
+        "logs" => "Reading container logs".to_string(),
+        "compose" => "Docker Compose operation".to_string(),
+        "stop" | "kill" | "rm" | "rmi" => "Managing containers".to_string(),
+        _ => "Docker operation".to_string(),
+    }
+}
+
+/// First whitespace-delimited token that does not start with `-`.
+fn first_non_flag(s: &str) -> &str {
+    s.split_whitespace()
+        .find(|t| !t.starts_with('-'))
+        .unwrap_or("")
+}
+
+/// Last path component of a file path (handles both `/` and `\`).
+fn basename(p: &str) -> &str {
+    p.rsplit(|c| c == '/' || c == '\\').next().unwrap_or(p)
+}
+
+/// Heuristic: does this token look like a file/directory path?
+fn looks_like_path(s: &str) -> bool {
+    !s.is_empty()
+        && (s.contains('.')
+            || s.starts_with('/')
+            || s.starts_with('\\')
+            || s.starts_with("..")
+            || s.contains('/')
+            || s.contains('\\'))
+}
+
+// ── end Bash command summarizer ──────────────────────────────────────────────
 
 fn truncate(s: &str, n: usize) -> String {
     if s.chars().count() <= n {
