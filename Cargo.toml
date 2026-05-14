@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = [
+    "apps/hook",
+    "apps/overlay/src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["overlay-app"]
+license = "MIT"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
