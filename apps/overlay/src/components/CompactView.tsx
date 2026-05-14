@@ -1,14 +1,100 @@
 import { invoke } from "@tauri-apps/api/core";
+import {
+  getCurrentWindow,
+  LogicalSize,
+  PhysicalPosition,
+} from "@tauri-apps/api/window";
 import clsx from "clsx";
-import { motion, AnimatePresence } from "framer-motion";
+import { AnimatePresence, motion } from "framer-motion";
+import { useEffect } from "react";
 import { useSessions } from "../store/sessions";
+import type { SettingsDTO } from "../types";
 import FleetBar from "./FleetBar";
+import HoverPanel from "./HoverPanel";
 import PrimaryLine from "./PrimaryLine";
 import StatusBadge from "./StatusBadge";
 
+const WIN_W = 380;
+const H_COLLAPSED = 52;
+/** Total window height when hover panel is open — must fit pill + card + padding or bottom clips. */
+const H_EXPANDED = 220;
+
 export default function CompactView() {
   const sessions = useSessions((s) => s.sessions);
+  const corner = useSessions((s) => s.corner);
+  const codexConnected = useSessions((s) => s.codexConnected);
+  const hoveredDotId = useSessions((s) => s.hoveredDotId);
+  const clearTempSelect = useSessions((s) => s.clearTempSelect);
+  const setCorner = useSessions((s) => s.setCorner);
+  const setCodexConnected = useSessions((s) => s.setCodexConnected);
+
   const primary = useSessions((s) => s.primary());
+  const doneQueueCount = useSessions(
+    (s) =>
+      s.sessions.filter((x) => x.status === "done" && !x.acknowledgedDone)
+        .length
+  );
+
+  const hoveredSession =
+    hoveredDotId === null
+      ? null
+      : (sessions.find((x) => x.id === hoveredDotId) ?? null);
+
+  const bottom = corner === "bl" || corner === "br";
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    getCurrentWindow()
+      .onFocusChanged(async ({ payload: focused }) => {
+        if (!focused) {
+          clearTempSelect();
+        } else {
+          try {
+            const settings = await invoke<SettingsDTO>("get_settings");
+            setCorner(settings.corner);
+            setCodexConnected(settings.codexConnected);
+          } catch {
+            /* ignore */
+          }
+        }
+      })
+      .then((u) => {
+        unlisten = u;
+      })
+      .catch(() => {});
+    return () => {
+      unlisten?.();
+    };
+  }, [clearTempSelect, setCorner, setCodexConnected]);
+
+  useEffect(() => {
+    const expanded = hoveredDotId !== null;
+    const bottomCorner = corner === "bl" || corner === "br";
+    const dyLogical = H_EXPANDED - H_COLLAPSED;
+
+    const run = async () => {
+      const win = getCurrentWindow();
+      if (expanded) {
+        if (bottomCorner) {
+          const pos = await win.outerPosition();
+          const scale = await win.scaleFactor();
+          const dy = Math.round(dyLogical * scale);
+          await win.setPosition(new PhysicalPosition(pos.x, pos.y - dy));
+        }
+        await win.setSize(new LogicalSize(WIN_W, H_EXPANDED));
+      } else {
+        await win.setSize(new LogicalSize(WIN_W, H_COLLAPSED));
+        if (bottomCorner) {
+          const pos = await win.outerPosition();
+          const scale = await win.scaleFactor();
+          const dy = Math.round(dyLogical * scale);
+          await win.setPosition(new PhysicalPosition(pos.x, pos.y + dy));
+        }
+      }
+    };
+
+    void run().catch(() => {});
+  }, [hoveredDotId, corner]);
 
   const tint =
     primary?.status === "errored"
@@ -17,23 +103,28 @@ export default function CompactView() {
         ? "bg-emerald-500/[0.05]"
         : "";
 
-  const onClick = () => {
+  const onOuterClick = () => {
+    clearTempSelect();
     if (!primary) return;
     invoke("focus_session", { id: primary.id }).catch(() => {});
   };
 
-  return (
+  const pillRow = (
     <div
       data-tauri-drag-region
       className={clsx(
-        "surface flex h-9 w-full items-center gap-3 px-3 transition-colors duration-220 ease-out cursor-default select-none",
+        "surface flex h-9 w-full shrink-0 items-center gap-3 px-3 transition-colors duration-220 ease-out cursor-default select-none",
         tint
       )}
-      onClick={onClick}
-      onDoubleClick={onClick}
+      onClick={onOuterClick}
+      onDoubleClick={onOuterClick}
     >
-      <FleetBar sessions={sessions} primaryId={primary?.id} />
-      <div className="flex-1 min-w-0">
+      <FleetBar
+        sessions={sessions}
+        primaryId={primary?.id}
+        codexConnected={codexConnected}
+      />
+      <div className="min-w-0 flex-1">
         <AnimatePresence mode="popLayout">
           {primary ? (
             <motion.div
@@ -44,22 +135,60 @@ export default function CompactView() {
               transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
               className="min-w-0"
             >
-              <PrimaryLine session={primary} />
+              <PrimaryLine
+                session={primary}
+                doneQueueCount={doneQueueCount}
+              />
             </motion.div>
           ) : (
             <motion.div
-              key="empty"
+              key={codexConnected ? "empty" : "disconnected"}
               initial={{ opacity: 0 }}
-              animate={{ opacity: 0.55 }}
+              animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              className="text-label text-white/50"
+              transition={{ duration: 0.22 }}
             >
-              No active sessions
+              {codexConnected ? (
+                <span className="text-label text-white/35">
+                  No active sessions
+                </span>
+              ) : (
+                <button
+                  className="flex items-center gap-1.5 text-label text-white/40 hover:text-white/65 transition-colors duration-220 ease-out"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    invoke("open_settings").catch(() => {});
+                  }}
+                >
+                  Connect Codex to get started
+                </button>
+              )}
             </motion.div>
           )}
         </AnimatePresence>
       </div>
       <StatusBadge session={primary} />
+    </div>
+  );
+
+  return (
+    <div
+      className={clsx(
+        "flex h-full w-full min-h-0 flex-col",
+        bottom ? "justify-end" : "justify-start"
+      )}
+    >
+      {bottom ? (
+        <>
+          <HoverPanel session={hoveredSession} corner={corner} />
+          {pillRow}
+        </>
+      ) : (
+        <>
+          {pillRow}
+          <HoverPanel session={hoveredSession} corner={corner} />
+        </>
+      )}
     </div>
   );
 }
