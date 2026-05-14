@@ -83,6 +83,10 @@ impl AppState {
         let snap = self.snapshot();
         let _ = app.emit("sessions:update", &snap);
     }
+
+    pub fn remove_session(&self, id: &str) {
+        self.sessions.write().remove(id);
+    }
 }
 
 pub type SharedState = Arc<AppState>;
