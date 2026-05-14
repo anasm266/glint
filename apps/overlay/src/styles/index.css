@@ -25,7 +25,7 @@ body {
   height: 100vh;
   background: transparent;
   display: flex;
-  align-items: center;
+  align-items: stretch;
   padding: 0 2px;
   box-sizing: border-box;
 }
@@ -45,4 +45,13 @@ body {
 
 .tnum {
   font-variant-numeric: tabular-nums;
+}
+
+/* Hide scrollbar in hover file list (still scrollable). */
+.scrollbar-none {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
 }
