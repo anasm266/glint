@@ -43,6 +43,7 @@ pub struct Session {
     pub started_at_ms: u64,
     pub last_event_at_ms: u64,
     pub acknowledged_done: bool,
+    pub last_prompt: String,
     pub files_edited: Vec<(String, DiffStat)>,
     #[serde(skip)]
     pub parent_pid: Option<u32>,
@@ -63,6 +64,7 @@ impl Session {
             started_at_ms: ts_ms,
             last_event_at_ms: ts_ms,
             acknowledged_done: false,
+            last_prompt: String::new(),
             files_edited: vec![],
             parent_pid,
             files_edited_map: HashMap::new(),
@@ -86,6 +88,60 @@ fn project_basename(cwd: &str) -> String {
         .and_then(|s| s.to_str())
         .map(|s| s.to_string())
         .unwrap_or_else(|| cwd.to_string())
+}
+
+const MAX_PROMPT_CHARS: usize = 4000;
+
+fn extract_user_prompt(p: &serde_json::Value) -> Option<String> {
+    // Try top-level string fields — exact name depends on Codex version.
+    let v = p
+        .get("input")
+        .or_else(|| p.get("content"))
+        .or_else(|| p.get("prompt"))
+        .or_else(|| p.get("user_input"))
+        .or_else(|| p.get("user_message"))
+        .or_else(|| p.get("message"))
+        .or_else(|| p.get("text"));
+
+    if let Some(v) = v {
+        if let Some(s) = v.as_str() {
+            return Some(s.to_string());
+        }
+        // Some hooks nest the text inside an object.
+        if let Some(obj) = v.as_object() {
+            for key in ["text", "content", "value"] {
+                if let Some(s) = obj.get(key).and_then(|x| x.as_str()) {
+                    return Some(s.to_string());
+                }
+            }
+        }
+    }
+
+    // Fallback: longest top-level string that isn't a known structural field.
+    let structural: &[&str] = &["session_id", "cwd", "hook_event_name"];
+    if let Some(obj) = p.as_object() {
+        let best = obj
+            .iter()
+            .filter(|(k, _)| !structural.contains(&k.as_str()))
+            .filter_map(|(_, v)| v.as_str())
+            .max_by_key(|s| s.len());
+        if let Some(s) = best {
+            if s.len() > 3 {
+                return Some(s.to_string());
+            }
+        }
+    }
+
+    None
+}
+
+fn truncate_prompt(s: String) -> String {
+    if s.chars().count() <= MAX_PROMPT_CHARS {
+        return s;
+    }
+    let mut out: String = s.chars().take(MAX_PROMPT_CHARS.saturating_sub(1)).collect();
+    out.push('…');
+    out
 }
 
 /// Raw event envelope as produced by `overlay-hook.exe`.
@@ -140,12 +196,20 @@ pub fn apply(map: &mut HashMap<String, Session>, raw: RawEvent) -> Option<String
             entry.current_action = "Thinking…".to_string();
             entry.acknowledged_done = false;
             entry.started_at_ms = raw.ts;
+            entry.last_prompt = String::new();
         }
         "UserPromptSubmit" => {
             entry.status = Status::Working;
             entry.current_action = "Thinking…".to_string();
             entry.acknowledged_done = false;
             entry.started_at_ms = raw.ts;
+            entry.last_prompt = String::new();
+            if let Some(prompt) = extract_user_prompt(p) {
+                let t = prompt.trim();
+                if !t.is_empty() {
+                    entry.last_prompt = truncate_prompt(t.to_string());
+                }
+            }
         }
         "PreToolUse" => {
             entry.status = Status::Working;
