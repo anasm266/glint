@@ -39,6 +39,7 @@ pub fn run() {
         .manage(state.clone())
         .invoke_handler(tauri::generate_handler![
             commands::get_sessions,
+            commands::remove_session,
             commands::focus_session,
             commands::install_codex_hooks,
             commands::remove_codex_hooks,

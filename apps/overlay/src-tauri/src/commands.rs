@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use tauri::{AppHandle, Manager, State};
 
 use crate::hook_install;
-use crate::session::Session;
+use crate::session::{Session, Status};
 use crate::state::{Corner, Settings, SharedState};
 use crate::win;
 
@@ -16,6 +16,12 @@ pub fn get_sessions(state: State<'_, SharedState>) -> Vec<Session> {
 }
 
 #[tauri::command]
+pub fn remove_session(id: String, state: State<'_, SharedState>, app: AppHandle) {
+    state.remove_session(&id);
+    state.emit_snapshot(&app);
+}
+
+#[tauri::command]
 pub fn focus_session(
     id: String,
     state: State<'_, SharedState>,
@@ -23,7 +29,12 @@ pub fn focus_session(
 ) -> Result<bool, String> {
     let parent_pid = state.with_sessions(|m| {
         m.get_mut(&id).and_then(|s| {
-            s.acknowledged_done = true;
+            // Only "done pending review" is acknowledged on focus. Working
+            // sessions must keep acknowledged_done false so the UI does not
+            // treat a focus click as dismissing a completed run.
+            if s.status == Status::Done {
+                s.acknowledged_done = true;
+            }
             s.parent_pid
         })
     });
