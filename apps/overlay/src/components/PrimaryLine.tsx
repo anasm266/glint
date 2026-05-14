@@ -1,3 +1,4 @@
+import clsx from "clsx";
 import type { SessionDTO } from "../types";
 
 const appLabel: Record<SessionDTO["app"], string> = {
@@ -6,12 +7,20 @@ const appLabel: Record<SessionDTO["app"], string> = {
   claude: "Claude",
 };
 
-export default function PrimaryLine({ session }: { session: SessionDTO }) {
+export default function PrimaryLine({
+  session,
+  doneQueueCount = 0,
+}: {
+  session: SessionDTO;
+  doneQueueCount?: number;
+}) {
   const action =
     session.status === "done" ? doneAction(session) : session.currentAction;
 
+  const showQueue = doneQueueCount > 1;
+
   return (
-    <div className="flex items-baseline gap-2 min-w-0">
+    <div className="flex min-w-0 items-baseline gap-2">
       <span className="shrink-0 text-label text-white/55">
         {appLabel[session.app]}
         {session.project ? <span className="text-white/35"> · </span> : null}
@@ -19,7 +28,12 @@ export default function PrimaryLine({ session }: { session: SessionDTO }) {
           <span className="text-white/75">{session.project}</span>
         ) : null}
       </span>
-      <span className="truncate text-value text-white/92">{action}</span>
+      <span className="flex min-w-0 items-baseline gap-1.5 truncate text-value text-white/92">
+        {showQueue ? (
+          <span className="shrink-0 text-dot-done">✓ {doneQueueCount} done · </span>
+        ) : null}
+        <span className={clsx("truncate", showQueue && "min-w-0")}>{action}</span>
+      </span>
     </div>
   );
 }
