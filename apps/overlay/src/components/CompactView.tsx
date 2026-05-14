@@ -15,9 +15,11 @@ import PrimaryLine from "./PrimaryLine";
 import StatusBadge from "./StatusBadge";
 
 const WIN_W = 380;
-const H_COLLAPSED = 52;
-/** Total window height when hover panel is open — must fit pill + card + padding or bottom clips. */
-const H_EXPANDED = 220;
+// 8px extra below the pill gives the box-shadow room to fade before hitting
+// the WebView boundary, eliminating the rectangular halo on light backgrounds.
+const H_COLLAPSED = 60;
+/** Total window height when hover panel is open — must fit pill + card + shadow buffer. */
+const H_EXPANDED = 228;
 
 export default function CompactView() {
   const sessions = useSessions((s) => s.sessions);

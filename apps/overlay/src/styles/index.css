@@ -37,9 +37,10 @@ body {
   background: rgba(18, 18, 24, 0.82);
   border: 1px solid rgba(255, 255, 255, 0.10);
   border-radius: 14px;
+  /* Shadow blur kept tight so it fades within the transparent window area
+     and does not produce a rectangular halo against light backgrounds. */
   box-shadow:
-    0 4px 16px rgba(0, 0, 0, 0.45),
-    0 1px 3px rgba(0, 0, 0, 0.30),
+    0 2px 8px rgba(0, 0, 0, 0.40),
     inset 0 1px 0 rgba(255, 255, 255, 0.06);
 }
 
