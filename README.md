@@ -6,6 +6,8 @@ A translucent always-on-top Windows overlay that shows live state of your AI cod
 
 v0.1 — Milestone A. Codex Desktop only. Compact view only. Dogfood build.
 
+Upcoming polish and behavior changes are tracked in [ROADMAP.md](ROADMAP.md).
+
 ## What it shows
 
 A 380x52 pill in the top-right of your primary monitor:
