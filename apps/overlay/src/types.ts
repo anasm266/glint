@@ -17,6 +17,7 @@ export interface SessionDTO {
   startedAtMs: number;
   lastEventAtMs: number;
   acknowledgedDone: boolean;
+  lastPrompt: string;
   filesEdited: Array<[string, DiffStat]>;
 }
 
