@@ -31,12 +31,34 @@ pub struct DiffStat {
     pub dels: u32,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ActivityKind {
+    Normal,
+    Success,
+    Failure,
+}
+
+impl Default for ActivityKind {
+    fn default() -> Self {
+        Self::Normal
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ActivityEntry {
     pub seq: u64,
     pub at_ms: u64,
     pub summary: String,
+    #[serde(default = "default_activity_count")]
+    pub count: u32,
+    #[serde(default)]
+    pub kind: ActivityKind,
+}
+
+fn default_activity_count() -> u32 {
+    1
 }
 
 const MAX_ACTIVITY_ENTRIES: usize = 8;
@@ -56,6 +78,10 @@ pub struct Session {
     pub last_prompt: String,
     pub files_edited: Vec<(String, DiffStat)>,
     pub recent_activity: Vec<ActivityEntry>,
+    pub model: String,
+    pub last_commit_hash: Option<String>,
+    #[serde(skip)]
+    pub last_turn_id: String,
     #[serde(skip)]
     pub next_activity_seq: u64,
     #[serde(skip)]
@@ -80,22 +106,33 @@ impl Session {
             last_prompt: String::new(),
             files_edited: vec![],
             recent_activity: vec![],
+            model: String::new(),
+            last_commit_hash: None,
+            last_turn_id: String::new(),
             next_activity_seq: 0,
             parent_pid,
             files_edited_map: HashMap::new(),
         }
     }
 
-    pub fn push_activity(&mut self, summary: String, at_ms: u64) {
+    pub fn push_activity_with_kind(
+        &mut self,
+        summary: String,
+        at_ms: u64,
+        kind: ActivityKind,
+        turn_id: &str,
+    ) {
         if summary.is_empty() {
             return;
         }
-        if self
-            .recent_activity
-            .first()
-            .is_some_and(|e| e.summary == summary)
-        {
-            return;
+        if let Some(first) = self.recent_activity.first_mut() {
+            if first.summary == summary {
+                if !turn_id.is_empty() && turn_id == self.last_turn_id {
+                    first.count = first.count.saturating_add(1);
+                    return;
+                }
+                return;
+            }
         }
         self.next_activity_seq += 1;
         self.recent_activity.insert(
@@ -104,11 +141,11 @@ impl Session {
                 seq: self.next_activity_seq,
                 at_ms,
                 summary,
+                count: 1,
+                kind,
             },
         );
-        if self.recent_activity.len() > MAX_ACTIVITY_ENTRIES {
-            self.recent_activity.truncate(MAX_ACTIVITY_ENTRIES);
-        }
+        self.recent_activity.truncate(MAX_ACTIVITY_ENTRIES);
     }
 
     pub fn flatten_files(&mut self) {
@@ -230,6 +267,10 @@ pub fn apply(map: &mut HashMap<String, Session>, raw: RawEvent) -> Option<String
     }
     entry.last_event_at_ms = raw.ts;
 
+    if let Some(model) = p.get("model").and_then(|v| v.as_str()) {
+        entry.model = model.to_string();
+    }
+
     match raw.event.as_str() {
         "SessionStart" => {
             entry.status = Status::Working;
@@ -258,14 +299,36 @@ pub fn apply(map: &mut HashMap<String, Session>, raw: RawEvent) -> Option<String
         "PreToolUse" => {
             entry.status = Status::Working;
             let action = describe_pre_tool(p);
+            let turn_id = p.get("turn_id").and_then(|v| v.as_str()).unwrap_or("");
             entry.current_action = action.clone();
-            entry.push_activity(action, raw.ts);
+            entry.push_activity_with_kind(action, raw.ts, ActivityKind::Normal, turn_id);
+            entry.last_turn_id = turn_id.to_string();
         }
         "PostToolUse" => {
-            // Track file edits when we can derive them; otherwise leave action
-            // alone (PreToolUse already set it).
             track_files_from_post(entry, p);
-            // Keep working status; "Thinking…" between tools feels accurate.
+            let tool = p.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
+            let response = p
+                .get("tool_response")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if tool == "Bash" {
+                if let Some((passed, failed)) = parse_test_result(response) {
+                    let summary = if failed == 0 {
+                        format!("{passed} tests passed")
+                    } else {
+                        format!("{failed} tests failed")
+                    };
+                    let kind = if failed == 0 {
+                        ActivityKind::Success
+                    } else {
+                        ActivityKind::Failure
+                    };
+                    entry.push_activity_with_kind(summary, raw.ts, kind, "");
+                }
+                if let Some(hash) = parse_commit_hash(response) {
+                    entry.last_commit_hash = Some(hash);
+                }
+            }
             entry.current_action = "Thinking…".to_string();
         }
         "Stop" => {
@@ -594,7 +657,120 @@ fn classify_bash(cmd: &str) -> String {
     }
 }
 
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            while let Some(&next) = chars.peek() {
+                chars.next();
+                if next == 'm' {
+                    break;
+                }
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn parse_digits_before(s: &str, suffix: &str) -> Option<u32> {
+    let idx = s.find(suffix)?;
+    let before = s[..idx].trim_end();
+    let num: String = before
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    if num.is_empty() {
+        return None;
+    }
+    num.parse().ok()
+}
+
+fn parse_test_result(response: &str) -> Option<(u32, u32)> {
+    let s = strip_ansi(response);
+    let passed = parse_digits_before(&s, " passed");
+    let failed = parse_digits_before(&s, " failed");
+    match (passed, failed) {
+        (Some(p), f) => Some((p, f.unwrap_or(0))),
+        (None, Some(f)) => Some((0, f)),
+        _ => None,
+    }
+}
+
+fn parse_commit_hash(response: &str) -> Option<String> {
+    for line in response.lines() {
+        let line = line.trim();
+        if !line.starts_with('[') || !line.ends_with(']') {
+            continue;
+        }
+        let inner = &line[1..line.len() - 1];
+        let mut parts = inner.split_whitespace();
+        let _branch = parts.next()?;
+        let hash = parts.next()?;
+        if (6..=12).contains(&hash.len()) && hash.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Some(hash.chars().take(8).collect());
+        }
+    }
+    None
+}
+
+fn rest_after_first_token(s: &str) -> &str {
+    let s = s.trim();
+    let pos = s.find(char::is_whitespace).unwrap_or(s.len());
+    s[pos..].trim()
+}
+
+fn next_token(s: &str) -> Option<(&str, &str)> {
+    let s = s.trim_start();
+    if s.is_empty() {
+        return None;
+    }
+    let end = s.find(char::is_whitespace).unwrap_or(s.len());
+    Some((&s[..end], s[end..].trim_start()))
+}
+
+fn strip_npm_workspace_flags(mut rest: &str) -> &str {
+    loop {
+        let (token, remainder) = match next_token(rest) {
+            Some(t) => t,
+            None => return rest,
+        };
+        match token {
+            "-C" | "--filter" => {
+                let (_, after_arg) = next_token(remainder).unwrap_or((token, remainder));
+                rest = after_arg;
+            }
+            "--workspace-root" | "-w" => {
+                rest = remainder;
+            }
+            _ => return rest,
+        }
+    }
+}
+
+fn classify_nx(sub: &str) -> String {
+    match sub {
+        "typecheck" | "type-check" => "Type checking".to_string(),
+        "lint" => "Linting".to_string(),
+        "test" => "Running tests".to_string(),
+        "build" => "Building".to_string(),
+        "serve" | "dev" => "Starting dev server".to_string(),
+        _ => format!("Running: {}", truncate(sub, 24)),
+    }
+}
+
+fn classify_exec(binary: &str) -> String {
+    classify_bash(binary)
+}
+
 fn classify_npm(rest: &str) -> String {
+    let rest = strip_npm_workspace_flags(rest);
     let sub = first_non_flag(rest);
     match sub {
         "test" => "Running tests".to_string(),
@@ -623,6 +799,8 @@ fn classify_npm(rest: &str) -> String {
                 name => format!("Running: {}", truncate(name, 24)),
             }
         }
+        "nx" | "turbo" => classify_nx(first_non_flag(rest_after_first_token(rest))),
+        "exec" | "x" => classify_exec(first_non_flag(rest_after_first_token(rest))),
         _ => "Running npm".to_string(),
     }
 }

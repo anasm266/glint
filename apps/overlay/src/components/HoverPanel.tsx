@@ -145,6 +145,12 @@ function ContextRow({ session }: { session: SessionDTO }) {
         <span className="text-white/45">{session.project || "—"}</span>
         <span className="text-white/20"> · </span>
         {appLabel[session.app]}
+        {session.model ? (
+          <>
+            <span className="text-white/15"> · </span>
+            {session.model}
+          </>
+        ) : null}
       </span>
     </div>
   );
@@ -186,11 +192,20 @@ function ActivityFeed({ entries }: { entries: ActivityEntryDTO[] }) {
               transition={{ duration: 0.18, ease: easeOut }}
               className={clsx(
                 "overflow-hidden text-[11px] leading-snug",
-                i === 0 ? "text-white/70" : "text-white/38"
+                entry.kind === "success"
+                  ? "text-emerald-400/70"
+                  : entry.kind === "failure"
+                    ? "text-rose-400/70"
+                    : i === 0
+                      ? "text-white/70"
+                      : "text-white/38"
               )}
               title={entry.summary}
             >
               {entry.summary}
+              {entry.count > 1 ? (
+                <span className="ml-1.5 text-[10px] opacity-40">×{entry.count}</span>
+              ) : null}
             </motion.div>
           ))}
         </AnimatePresence>
@@ -217,6 +232,11 @@ function DoneResult({ session }: { session: SessionDTO }) {
     <div className="flex min-h-0 flex-col gap-2">
       <p className="text-[14px] font-medium leading-snug text-white/90 tnum">
         +{adds} / −{dels} across {n} file{n === 1 ? "" : "s"}
+        {session.lastCommitHash ? (
+          <span className="ml-2 font-mono text-[11px] text-white/30">
+            {session.lastCommitHash}
+          </span>
+        ) : null}
       </p>
       <motion.ul
         variants={listContainerVariants}

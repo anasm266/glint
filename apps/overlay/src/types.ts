@@ -7,10 +7,14 @@ export interface DiffStat {
   dels: number;
 }
 
+export type ActivityKind = "normal" | "success" | "failure";
+
 export interface ActivityEntryDTO {
   seq: number;
   atMs: number;
   summary: string;
+  count: number;
+  kind: ActivityKind;
 }
 
 export interface SessionDTO {
@@ -26,6 +30,8 @@ export interface SessionDTO {
   lastPrompt: string;
   filesEdited: Array<[string, DiffStat]>;
   recentActivity: ActivityEntryDTO[];
+  model: string;
+  lastCommitHash: string | null;
 }
 
 export type Corner = "tl" | "tr" | "bl" | "br";
