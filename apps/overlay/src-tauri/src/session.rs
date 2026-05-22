@@ -215,7 +215,7 @@ fn format_parallel_summary(summaries: &[String]) -> String {
 }
 
 fn activity_dedupe_key(raw_cmd: &str) -> String {
-    strip_shell_noise(raw_cmd)
+    label_command_segment(raw_cmd)
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
@@ -353,11 +353,13 @@ fn turn_id_from_payload(p: &serde_json::Value) -> &str {
         .unwrap_or("")
 }
 
-fn tool_response_str<'a>(p: &'a serde_json::Value) -> &'a str {
-    if let Some(s) = p.get("tool_response").and_then(|v| v.as_str()) {
-        return s;
-    }
-    p.get("tool_output").and_then(|v| v.as_str()).unwrap_or("")
+fn tool_response_str(p: &serde_json::Value) -> String {
+    let raw = p
+        .get("tool_response")
+        .and_then(|v| v.as_str())
+        .or_else(|| p.get("tool_output").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    unwrap_shell_response(raw)
 }
 
 fn path_from_tool_input(input: Option<&serde_json::Value>) -> Option<String> {
@@ -544,13 +546,13 @@ pub fn apply(map: &mut HashMap<String, Session>, raw: RawEvent) -> Option<String
             let tool = p.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
             let response = tool_response_str(p);
             if tool == "Bash" || tool == "Shell" {
-                parse_gh_pr_post(entry, response, raw.ts);
-                parse_gh_issue_post(entry, response, raw.ts);
-                parse_rg_post(entry, response, raw.ts);
-                parse_git_log_post(entry, response, raw.ts);
-                parse_git_blame_post(entry, response, raw.ts);
-                parse_node_probe_post(entry, response, raw.ts);
-                if let Some((passed, failed)) = parse_test_result(response) {
+                parse_gh_pr_post(entry, &response, raw.ts);
+                parse_gh_issue_post(entry, &response, raw.ts);
+                parse_rg_post(entry, &response, raw.ts);
+                parse_git_log_post(entry, &response, raw.ts);
+                parse_git_blame_post(entry, &response, raw.ts);
+                parse_node_probe_post(entry, &response, raw.ts);
+                if let Some((passed, failed)) = parse_test_result(&response) {
                     let summary = if failed == 0 {
                         format!("{passed} tests passed")
                     } else {
@@ -564,7 +566,7 @@ pub fn apply(map: &mut HashMap<String, Session>, raw: RawEvent) -> Option<String
                     entry.push_activity_with_kind(summary, raw.ts, kind, "");
                 }
                 if should_parse_commit_hash(&entry.last_bash_command) {
-                    if let Some(hash) = parse_commit_hash(response) {
+                    if let Some(hash) = parse_commit_hash(&response) {
                         entry.last_commit_hash = Some(hash);
                     }
                 }
@@ -760,8 +762,107 @@ fn describe_bash(raw: &str) -> String {
     if let Some(label) = classify_pipeline_or_heredoc(raw) {
         return label;
     }
-    let cmd = strip_shell_noise(raw);
-    classify_bash(cmd)
+    let segments = substantive_command_segments(raw);
+    if segments.is_empty() {
+        return classify_bash(raw.trim());
+    }
+    segments
+        .iter()
+        .map(|seg| classify_bash(seg))
+        .max_by_key(|label| label_priority(label))
+        .unwrap_or_else(|| classify_bash(raw.trim()))
+}
+
+fn label_priority(label: &str) -> u8 {
+    if label.starts_with("Running:") || label == "Running command" {
+        return 10;
+    }
+    match label {
+        "Pushing to remote" => 95,
+        "Committing changes" => 90,
+        "Fetching from remote" | "Cloning repository" => 85,
+        "Creating PR" | "Updating PR" => 84,
+        "Viewing PR" | "Viewing issue" => 50,
+        "Searching git history" | "Blaming lines in file" => 55,
+        "Checking git state" | "Listing branches" | "Deleting branch" => 40,
+        "Searching code" | "Reading file" => 45,
+        "Running inline script" | "Running Node" => 42,
+        _ if label.starts_with("Found ") || label.starts_with("Match:") => 60,
+        _ if label.contains("tests") => 70,
+        _ => 50,
+    }
+}
+
+fn substantive_command_segments(raw: &str) -> Vec<&str> {
+    let s = raw.trim();
+    let mut out = Vec::new();
+    for segment in s.split(';') {
+        let seg = segment.trim();
+        if seg.is_empty() || is_shell_assignment(seg) || is_shell_navigation(seg) {
+            continue;
+        }
+        out.push(seg);
+    }
+    out
+}
+
+/// Cursor Shell often prefixes `Set-Location <path>;` before the real command.
+/// Pick the last substantive `;`-segment for display labels.
+fn label_command_segment(raw: &str) -> &str {
+    let s = raw.trim();
+    let mut last_substantive: Option<&str> = None;
+    let mut first_non_assign: Option<&str> = None;
+
+    for segment in s.split(';') {
+        let seg = segment.trim();
+        if seg.is_empty() || is_shell_assignment(seg) {
+            continue;
+        }
+        if first_non_assign.is_none() {
+            first_non_assign = Some(seg);
+        }
+        if !is_shell_navigation(seg) {
+            last_substantive = Some(seg);
+        }
+    }
+
+    last_substantive
+        .or(first_non_assign)
+        .unwrap_or(s)
+}
+
+fn is_shell_assignment(seg: &str) -> bool {
+    (seg.starts_with('$') && {
+        let up_to_eq = seg.find('=').unwrap_or(0);
+        let up_to_sp = seg.find(char::is_whitespace).unwrap_or(usize::MAX);
+        up_to_eq > 0 && up_to_eq <= up_to_sp
+    }) || (seg.starts_with("set ") && seg.contains('='))
+}
+
+fn is_shell_navigation(seg: &str) -> bool {
+    let verb = match seg.split_whitespace().next() {
+        Some(v) => v.to_ascii_lowercase(),
+        None => return false,
+    };
+    matches!(
+        verb.as_str(),
+        "set-location" | "cd" | "chdir" | "push-location" | "pop-location" | "pushd" | "popd"
+    )
+}
+
+/// Cursor `tool_output` is often JSON: `{"output":"...","exitCode":0}`.
+fn unwrap_shell_response(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if !trimmed.starts_with('{') {
+        return raw.to_string();
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+        return raw.to_string();
+    };
+    v.get("output")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| raw.to_string())
 }
 
 fn classify_pipeline_or_heredoc(raw: &str) -> Option<String> {
@@ -797,20 +898,11 @@ fn strip_shell_noise(raw: &str) -> &str {
     let mut last_non_assign: &str = s;
     for segment in s.split(';') {
         let seg = segment.trim();
-        if seg.is_empty() {
+        if seg.is_empty() || is_shell_assignment(seg) {
             continue;
         }
-        // A segment is a pure assignment if it starts with `$` and contains `=`
-        // before any whitespace, or is a simple `set KEY=VALUE` style.
-        let is_assignment = (seg.starts_with('$') && {
-            let up_to_eq = seg.find('=').unwrap_or(0);
-            let up_to_sp = seg.find(char::is_whitespace).unwrap_or(usize::MAX);
-            up_to_eq > 0 && up_to_eq <= up_to_sp
-        }) || seg.starts_with("set ") && seg.contains('=');
-        if !is_assignment {
-            last_non_assign = seg;
-            break;
-        }
+        last_non_assign = seg;
+        break;
     }
     s = last_non_assign;
 
@@ -1030,7 +1122,7 @@ fn should_parse_commit_hash(last_cmd: &str) -> bool {
     if last_cmd.is_empty() {
         return false;
     }
-    let cmd = strip_shell_noise(last_cmd).to_ascii_lowercase();
+    let cmd = last_cmd.to_ascii_lowercase();
     cmd.contains("git commit")
         || cmd.contains("git push")
         || cmd.contains("git cherry-pick")
@@ -1796,6 +1888,24 @@ mod tests {
             describe_bash("rg no-unnecessary-type-assertion src/rules/no-unnecessary-type-assertion.ts"),
             "Searching no-unnecessary-type-assertion.ts"
         );
+    }
+
+    #[test]
+    fn describe_bash_cursor_set_location_then_git() {
+        let cmd = r#"Set-Location "c:\proj\overlay-app"; git status -sb; git log -3 --oneline"#;
+        assert_eq!(describe_bash(cmd), "Checking git state");
+    }
+
+    #[test]
+    fn describe_bash_cursor_set_location_then_git_push() {
+        let cmd = r#"Set-Location "c:\proj"; git add .; git commit -m "msg"; git push origin main; git status -sb"#;
+        assert_eq!(describe_bash(cmd), "Pushing to remote");
+    }
+
+    #[test]
+    fn unwrap_shell_response_extracts_cursor_json() {
+        let raw = "{\"output\":\"## main...origin/main\\n\",\"exitCode\":0}";
+        assert_eq!(unwrap_shell_response(raw), "## main...origin/main\n");
     }
 
     #[test]
