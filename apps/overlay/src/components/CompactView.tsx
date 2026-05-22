@@ -23,7 +23,7 @@ const WIN_W = 380;
 // the WebView boundary, eliminating the rectangular halo on light backgrounds.
 const H_COLLAPSED = 60;
 /** Total window height when hover panel is open — must fit pill + card + shadow buffer. */
-const H_EXPANDED = 228;
+const H_EXPANDED = 300;
 
 export default function CompactView() {
   const sessions = useSessions((s) => s.sessions);

@@ -7,6 +7,12 @@ export interface DiffStat {
   dels: number;
 }
 
+export interface ActivityEntryDTO {
+  seq: number;
+  atMs: number;
+  summary: string;
+}
+
 export interface SessionDTO {
   id: string;
   app: App;
@@ -19,6 +25,7 @@ export interface SessionDTO {
   acknowledgedDone: boolean;
   lastPrompt: string;
   filesEdited: Array<[string, DiffStat]>;
+  recentActivity: ActivityEntryDTO[];
 }
 
 export type Corner = "tl" | "tr" | "bl" | "br";

@@ -2,7 +2,7 @@ import clsx from "clsx";
 import { invoke } from "@tauri-apps/api/core";
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useState } from "react";
-import type { Corner, SessionDTO } from "../types";
+import type { ActivityEntryDTO, Corner, SessionDTO } from "../types";
 import {
   cancelScheduledHoverLeave,
   scheduleHoverLeaveClear,
@@ -36,6 +36,22 @@ const listItemVariants = {
   },
 };
 
+const activityEnter = {
+  opacity: 0,
+  y: -6,
+  height: 0,
+};
+const activityAnimate = {
+  opacity: 1,
+  y: 0,
+  height: "auto" as const,
+};
+const activityExit = {
+  opacity: 0,
+  y: 6,
+  height: 0,
+};
+
 export default function HoverPanel({
   session,
   corner,
@@ -45,17 +61,12 @@ export default function HoverPanel({
 }) {
   const bottom = corner === "bl" || corner === "br";
   const [now, setNow] = useState(() => Date.now());
-  const [clockMode, setClockMode] = useState(false);
   const setPillPanelHovered = useSessions((s) => s.setPillPanelHovered);
 
   useEffect(() => {
     const id = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(id);
   }, []);
-
-  useEffect(() => {
-    setClockMode(false);
-  }, [session?.id]);
 
   return (
     <div
@@ -85,73 +96,7 @@ export default function HoverPanel({
               scheduleHoverLeaveClear();
             }}
           >
-            <div className="flex items-center justify-between gap-2">
-              <div className="text-[11px] text-white/50">
-                <span className="font-medium text-white/80">
-                  {session.project || "—"}
-                </span>
-                <span className="text-white/30"> · </span>
-                <span>{appLabel[session.app]}</span>
-              </div>
-              <div
-                className={clsx(
-                  "h-1.5 w-1.5 shrink-0 rounded-full",
-                  session.status === "working" && "bg-dot-work animate-breathe",
-                  session.status === "done" && "bg-dot-done",
-                  session.status === "errored" && "bg-dot-err",
-                  session.status === "idle" && "bg-dot-idle"
-                )}
-              />
-            </div>
-
-            <div className="flex flex-wrap items-center justify-end gap-2">
-              <button
-                type="button"
-                className="rounded px-2 py-0.5 text-[11px] text-white/50 transition-colors duration-150 ease-out hover:bg-white/[0.06] hover:text-white/80"
-                title="Bring the Codex app window to the front"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  invoke("open_codex", { id: session.id }).catch(() => {});
-                }}
-              >
-                Open Codex
-              </button>
-              {session.status === "done" && !session.acknowledgedDone ? (
-                <button
-                  type="button"
-                  className="rounded px-2 py-0.5 text-[11px] text-emerald-400/70 transition-colors duration-150 ease-out hover:bg-emerald-500/10 hover:text-emerald-300/90"
-                  title="Acknowledge without switching apps"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    invoke("acknowledge_done", { id: session.id }).catch(
-                      () => {}
-                    );
-                  }}
-                >
-                  Dismiss
-                </button>
-              ) : null}
-            </div>
-
-            <AnimatePresence initial={false}>
-              {session.lastPrompt ? (
-                <motion.div
-                  key="prompt"
-                  initial={{ opacity: 0, height: 0, marginTop: 0 }}
-                  animate={{ opacity: 1, height: "auto" }}
-                  exit={{ opacity: 0, height: 0 }}
-                  transition={{ duration: 0.2, ease: easeOut }}
-                  className="overflow-hidden"
-                >
-                  <p
-                    className="line-clamp-2 text-[11px] leading-snug text-white/55 italic"
-                    title={session.lastPrompt}
-                  >
-                    {session.lastPrompt}
-                  </p>
-                </motion.div>
-              ) : null}
-            </AnimatePresence>
+            <ContextRow session={session} />
 
             <AnimatePresence mode="popLayout" initial={false}>
               <motion.div
@@ -162,36 +107,19 @@ export default function HoverPanel({
                 transition={{ duration: 0.2, ease: easeOut }}
                 className="min-h-0"
               >
-                {session.status === "done" ? (
-                  <DoneBody session={session} />
+                {session.status === "working" ? (
+                  <WorkingResult session={session} />
+                ) : session.status === "done" ? (
+                  <DoneResult session={session} />
+                ) : session.status === "errored" ? (
+                  <ErroredResult session={session} />
                 ) : (
-                  <WorkingBody session={session} />
+                  <WorkingResult session={session} />
                 )}
               </motion.div>
             </AnimatePresence>
 
-            <button
-              type="button"
-              className="mt-0.5 border-t border-white/[0.06] pt-2.5 text-left text-[11px] tnum text-white/38 transition-colors duration-150 ease-out hover:text-white/60"
-              title={clockMode ? "Show elapsed time" : "Show clock time"}
-              onClick={(e) => {
-                e.stopPropagation();
-                setClockMode((m) => !m);
-              }}
-            >
-              <AnimatePresence mode="popLayout" initial={false}>
-                <motion.span
-                  key={clockMode ? "clock" : "elapsed"}
-                  initial={{ opacity: 0, y: clockMode ? -5 : 5 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: clockMode ? 5 : -5 }}
-                  transition={{ duration: 0.18, ease: easeOut }}
-                  className="block"
-                >
-                  {clockMode ? clockLabel(session) : elapsedLabel(session, now)}
-                </motion.span>
-              </AnimatePresence>
-            </button>
+            <ActionStrip session={session} now={now} />
           </motion.div>
         ) : null}
       </AnimatePresence>
@@ -199,52 +127,104 @@ export default function HoverPanel({
   );
 }
 
-function WorkingBody({ session }: { session: SessionDTO }) {
+function ContextRow({ session }: { session: SessionDTO }) {
+  const prompt = session.lastPrompt?.trim();
+  const contextText = prompt
+    ? `You asked: ${truncatePrompt(prompt, 72)}`
+    : "New session";
+
   return (
-    <div className="flex flex-col gap-1.5">
-      <div className="text-[12px] leading-snug text-white/85">
-        {session.currentAction}
-      </div>
-      <AnimatePresence initial={false}>
-        {session.filesEdited.length > 0 ? (
-          <motion.div
-            key="touched"
-            initial={{ opacity: 0, y: 3 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 3 }}
-            transition={{ duration: 0.18, ease: easeOut }}
-            className="text-[11px] text-white/40"
-          >
-            {session.filesEdited.length} file
-            {session.filesEdited.length === 1 ? "" : "s"} touched so far
-          </motion.div>
-        ) : null}
-      </AnimatePresence>
+    <div className="flex min-w-0 items-baseline justify-between gap-2">
+      <p
+        className="min-w-0 flex-1 truncate text-[11px] text-white/40"
+        title={prompt || undefined}
+      >
+        {contextText}
+      </p>
+      <span className="shrink-0 text-[10px] text-white/28">
+        <span className="text-white/45">{session.project || "—"}</span>
+        <span className="text-white/20"> · </span>
+        {appLabel[session.app]}
+      </span>
     </div>
   );
 }
 
-function DoneBody({ session }: { session: SessionDTO }) {
-  if (session.filesEdited.length === 0) {
-    return (
-      <div className="text-[12px] leading-snug text-white/50">
-        Done — no files changed
+function WorkingResult({ session }: { session: SessionDTO }) {
+  const activity = session.recentActivity ?? [];
+
+  return (
+    <div className="flex flex-col gap-2">
+      <p className="text-[14px] font-medium leading-snug text-white/90">
+        {session.currentAction}
+      </p>
+      {activity.length > 0 ? <ActivityFeed entries={activity} /> : null}
+    </div>
+  );
+}
+
+function ActivityFeed({ entries }: { entries: ActivityEntryDTO[] }) {
+  return (
+    <div
+      className="relative max-h-[72px] overflow-hidden"
+      style={{
+        maskImage:
+          "linear-gradient(to bottom, black 0%, black 70%, transparent 100%)",
+        WebkitMaskImage:
+          "linear-gradient(to bottom, black 0%, black 70%, transparent 100%)",
+      }}
+    >
+      <div className="flex flex-col gap-0.5 overflow-hidden">
+        <AnimatePresence mode="popLayout" initial={false}>
+          {entries.map((entry, i) => (
+            <motion.div
+              key={entry.seq}
+              layout
+              initial={activityEnter}
+              animate={activityAnimate}
+              exit={activityExit}
+              transition={{ duration: 0.18, ease: easeOut }}
+              className={clsx(
+                "overflow-hidden text-[11px] leading-snug",
+                i === 0 ? "text-white/70" : "text-white/38"
+              )}
+              title={entry.summary}
+            >
+              {entry.summary}
+            </motion.div>
+          ))}
+        </AnimatePresence>
       </div>
+    </div>
+  );
+}
+
+function DoneResult({ session }: { session: SessionDTO }) {
+  const files = session.filesEdited;
+
+  if (files.length === 0) {
+    return (
+      <p className="text-[14px] font-medium leading-snug text-white/90">
+        No files changed
+      </p>
     );
   }
 
-  const { adds, dels } = fileDiffTotals(session.filesEdited);
-  const n = session.filesEdited.length;
+  const { adds, dels } = fileDiffTotals(files);
+  const n = files.length;
 
   return (
-    <div className="flex min-h-0 flex-col gap-1.5">
+    <div className="flex min-h-0 flex-col gap-2">
+      <p className="text-[14px] font-medium leading-snug text-white/90 tnum">
+        +{adds} / −{dels} across {n} file{n === 1 ? "" : "s"}
+      </p>
       <motion.ul
         variants={listContainerVariants}
         initial="hidden"
         animate="show"
-        className="scrollbar-none flex max-h-[76px] flex-col gap-0.5 overflow-y-auto"
+        className="scrollbar-none flex max-h-[88px] flex-col gap-0.5 overflow-y-auto"
       >
-        {session.filesEdited.map(([path, diff]) => (
+        {files.map(([path, diff]) => (
           <motion.li
             key={path}
             variants={listItemVariants}
@@ -260,11 +240,95 @@ function DoneBody({ session }: { session: SessionDTO }) {
           </motion.li>
         ))}
       </motion.ul>
-      <div className="border-t border-white/[0.06] pt-1.5 text-[10px] tnum text-white/32">
-        +{adds} / −{dels} · {n} file{n === 1 ? "" : "s"}
+    </div>
+  );
+}
+
+function ErroredResult({ session }: { session: SessionDTO }) {
+  return (
+    <p className="text-[14px] font-medium leading-snug text-rose-300/80">
+      {session.currentAction || "Something went wrong"}
+    </p>
+  );
+}
+
+function ActionStrip({ session, now }: { session: SessionDTO; now: number }) {
+  const showDismiss =
+    session.status === "done" && !session.acknowledgedDone;
+  const hasFiles = session.filesEdited.length > 0;
+  const isWorking = session.status === "working";
+  const isErrored = session.status === "errored";
+  const isDoneEmpty = session.status === "done" && !hasFiles;
+
+  const openCodex = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    invoke("open_codex", { id: session.id }).catch(() => {});
+  };
+
+  const dismiss = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    invoke("acknowledge_done", { id: session.id }).catch(() => {});
+  };
+
+  const primaryBtn =
+    "rounded-md bg-white/10 px-3 py-1.5 text-[12px] font-medium text-white/90 transition-colors duration-150 ease-out hover:bg-white/15";
+  const ghostBtn =
+    "rounded-md px-3 py-1.5 text-[12px] text-white/50 transition-colors duration-150 ease-out hover:bg-white/[0.06] hover:text-white/80";
+
+  return (
+    <div className="flex items-center justify-between gap-2 border-t border-white/[0.06] pt-2">
+      <span
+        className="text-[11px] tnum text-white/38"
+        title={absoluteTimeTitle(session)}
+      >
+        {elapsedLabel(session, now)}
+      </span>
+      <div className="flex items-center gap-1.5">
+        {isWorking ? (
+          <button type="button" className={ghostBtn} onClick={openCodex}>
+            Open Codex
+          </button>
+        ) : null}
+
+        {session.status === "done" && hasFiles ? (
+          <>
+            {showDismiss ? (
+              <button type="button" className={ghostBtn} onClick={dismiss}>
+                Dismiss
+              </button>
+            ) : null}
+            <button type="button" className={primaryBtn} onClick={openCodex}>
+              Open Codex
+            </button>
+          </>
+        ) : null}
+
+        {isDoneEmpty ? (
+          <>
+            <button type="button" className={ghostBtn} onClick={openCodex}>
+              Open Codex
+            </button>
+            {showDismiss ? (
+              <button type="button" className={primaryBtn} onClick={dismiss}>
+                Dismiss
+              </button>
+            ) : null}
+          </>
+        ) : null}
+
+        {isErrored ? (
+          <button type="button" className={primaryBtn} onClick={openCodex}>
+            Open Codex
+          </button>
+        ) : null}
       </div>
     </div>
   );
+}
+
+function truncatePrompt(s: string, max: number): string {
+  if (s.length <= max) return s;
+  return s.slice(0, max - 1) + "…";
 }
 
 function fileBasename(p: string): string {
@@ -295,41 +359,13 @@ function elapsedLabel(s: SessionDTO, now: number): string {
   return `Running ${humanElapsed(elapsed)}`;
 }
 
-function clockLabel(s: SessionDTO): string {
-  if (s.status === "done") {
-    return formatClockLine(new Date(s.lastEventAtMs), "finished");
-  }
-  return formatClockLine(new Date(s.startedAtMs), "started");
-}
-
-function formatClockLine(d: Date, kind: "started" | "finished"): string {
-  const now = new Date();
-  const sameDay = d.toDateString() === now.toDateString();
-  const yest = new Date(now);
-  yest.setDate(yest.getDate() - 1);
-  const isYesterday = d.toDateString() === yest.toDateString();
-  const time = d.toLocaleTimeString(undefined, {
-    hour: "numeric",
-    minute: "2-digit",
-  });
-
-  if (kind === "finished") {
-    if (sameDay) return `Finished at ${time}`;
-    if (isYesterday) return `Finished yesterday ${time}`;
-    const datePart = d.toLocaleDateString(undefined, {
-      month: "short",
-      day: "numeric",
-    });
-    return `Finished ${datePart} ${time}`;
-  }
-
-  if (sameDay) return `Started ${time}`;
-  if (isYesterday) return `Started yesterday ${time}`;
-  const datePart = d.toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-  });
-  return `Started ${datePart} ${time}`;
+function absoluteTimeTitle(s: SessionDTO): string {
+  const d =
+    s.status === "done"
+      ? new Date(s.lastEventAtMs)
+      : new Date(s.startedAtMs);
+  const kind = s.status === "done" ? "Finished" : "Started";
+  return `${kind} ${d.toLocaleString()}`;
 }
 
 function humanElapsed(ms: number): string {
