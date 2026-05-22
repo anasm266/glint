@@ -4,8 +4,9 @@
 //! consumes. The mapping is intentionally lossy: we strip everything the
 //! compact view doesn't need.
 
+use crate::state::SessionRouting;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -106,6 +107,9 @@ pub struct Session {
     /// Background Task subagents still running (Cursor multitask).
     #[serde(skip)]
     pub active_subagent_count: u32,
+    /// Child conversation ids linked to this parent (multitask rollup).
+    #[serde(skip)]
+    pub active_child_conversations: HashSet<String>,
 }
 
 impl Session {
@@ -141,6 +145,7 @@ impl Session {
             parent_pid,
             files_edited_map: HashMap::new(),
             active_subagent_count: 0,
+            active_child_conversations: HashSet::new(),
         }
     }
 
@@ -323,17 +328,46 @@ fn normalize_hook_event(name: &str) -> String {
     }
 }
 
-fn resolve_session_id(p: &serde_json::Value) -> String {
-    if let Some(parent) = p.get("parent_conversation_id").and_then(|v| v.as_str()) {
-        if !parent.is_empty() {
-            return parent.to_string();
-        }
-    }
+fn raw_conversation_id(p: &serde_json::Value) -> String {
     p.get("conversation_id")
         .or_else(|| p.get("session_id"))
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string()
+}
+
+fn resolve_session_id(p: &serde_json::Value) -> String {
+    let raw = raw_conversation_id(p);
+    if let Some(parent) = p.get("parent_conversation_id").and_then(|v| v.as_str()) {
+        if !parent.is_empty() && parent != raw {
+            return parent.to_string();
+        }
+    }
+    raw
+}
+
+fn task_run_in_background(p: &serde_json::Value) -> bool {
+    p.get("tool_name")
+        .and_then(|v| v.as_str())
+        .map(|t| t == "Task")
+        .unwrap_or(false)
+        && p.get("tool_input")
+            .and_then(|v| v.get("run_in_background"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+}
+
+fn unlink_child(
+    routing: &mut SessionRouting,
+    entry: &mut Session,
+    child_id: &str,
+    parent_id: &str,
+) {
+    if child_id.is_empty() || child_id == parent_id {
+        return;
+    }
+    routing.remove_child(child_id);
+    entry.active_child_conversations.remove(child_id);
 }
 
 fn resolve_cwd(p: &serde_json::Value) -> String {
@@ -441,12 +475,26 @@ fn resolve_event_name(raw_event: &str, p: &serde_json::Value) -> String {
 
 /// Apply a raw event to the session map. Returns the session id that was
 /// affected (if any) so callers can do follow-up work.
-pub fn apply(map: &mut HashMap<String, Session>, raw: RawEvent) -> Option<String> {
+pub fn apply(
+    map: &mut HashMap<String, Session>,
+    routing: &mut SessionRouting,
+    raw: RawEvent,
+) -> Option<String> {
     let payload = coerce_payload(&raw.payload);
     let p = &payload;
-    let session_id = resolve_session_id(p);
+    let raw_conv = raw_conversation_id(p);
+    let mut session_id = routing.resolve_parent(&raw_conv, p);
     if session_id.is_empty() {
         return None;
+    }
+    if session_id == raw_conv && !raw_conv.is_empty() {
+        if let Some(parent) = routing.try_link_orphan_child(&raw_conv, raw.ts) {
+            routing.link_child(&raw_conv, &parent);
+            session_id = parent;
+        }
+    }
+    if !raw_conv.is_empty() && raw_conv != session_id {
+        routing.link_child(&raw_conv, &session_id);
     }
 
     let cwd = resolve_cwd(p);
@@ -489,6 +537,7 @@ pub fn apply(map: &mut HashMap<String, Session>, raw: RawEvent) -> Option<String
             entry.turn_activity_turn_id.clear();
             entry.done_summary = None;
             entry.active_subagent_count = 0;
+            entry.active_child_conversations.clear();
         }
         "UserPromptSubmit" => {
             entry.status = Status::Working;
@@ -502,6 +551,7 @@ pub fn apply(map: &mut HashMap<String, Session>, raw: RawEvent) -> Option<String
             entry.turn_activity_turn_id.clear();
             entry.done_summary = None;
             entry.active_subagent_count = 0;
+            entry.active_child_conversations.clear();
             if let Some(prompt) = extract_user_prompt(p) {
                 let t = prompt.trim();
                 if !t.is_empty() {
@@ -512,6 +562,9 @@ pub fn apply(map: &mut HashMap<String, Session>, raw: RawEvent) -> Option<String
         "PreToolUse" => {
             entry.status = Status::Working;
             let tool = p.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
+            if task_run_in_background(p) {
+                routing.note_task_spawn(&session_id, raw.ts);
+            }
             if tool == "Bash" || tool == "Shell" {
                 let cmd = p
                     .get("tool_input")
@@ -590,6 +643,17 @@ pub fn apply(map: &mut HashMap<String, Session>, raw: RawEvent) -> Option<String
         "SubagentStart" => {
             entry.status = Status::Working;
             entry.acknowledged_done = false;
+            let parent_conv = p
+                .get("parent_conversation_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !raw_conv.is_empty()
+                && !parent_conv.is_empty()
+                && raw_conv != parent_conv
+            {
+                routing.link_child(&raw_conv, &session_id);
+                entry.active_child_conversations.insert(raw_conv.clone());
+            }
             entry.active_subagent_count = entry.active_subagent_count.saturating_add(1);
             let action = describe_subagent_start(p);
             if !action.is_empty() {
@@ -603,6 +667,7 @@ pub fn apply(map: &mut HashMap<String, Session>, raw: RawEvent) -> Option<String
             let flush_tid = entry.turn_activity_turn_id.clone();
             entry.flush_turn_activity(raw.ts, flush_tid.as_str());
             entry.active_subagent_count = entry.active_subagent_count.saturating_sub(1);
+            unlink_child(routing, entry, &raw_conv, &session_id);
             entry.status = Status::Working;
             let (summary, kind) = describe_subagent_stop(p);
             if !summary.is_empty() {
@@ -610,6 +675,8 @@ pub fn apply(map: &mut HashMap<String, Session>, raw: RawEvent) -> Option<String
             }
             entry.current_action = if entry.active_subagent_count > 0 {
                 format!("{} subagents running", entry.active_subagent_count)
+            } else if !entry.active_child_conversations.is_empty() {
+                "Subagents finishing…".to_string()
             } else {
                 "Thinking…".to_string()
             };
@@ -617,14 +684,32 @@ pub fn apply(map: &mut HashMap<String, Session>, raw: RawEvent) -> Option<String
         "SessionEnd" => {
             let flush_tid = entry.turn_activity_turn_id.clone();
             entry.flush_turn_activity(raw.ts, flush_tid.as_str());
-            entry.active_subagent_count = 0;
+            if raw_conv != session_id {
+                unlink_child(routing, entry, &raw_conv, &session_id);
+            } else {
+                entry.active_subagent_count = 0;
+                entry.active_child_conversations.clear();
+            }
             apply_session_end(entry, p);
             entry.flatten_files();
         }
         "Stop" => {
             let flush_tid = entry.turn_activity_turn_id.clone();
             entry.flush_turn_activity(raw.ts, flush_tid.as_str());
+            if raw_conv != session_id {
+                unlink_child(routing, entry, &raw_conv, &session_id);
+            } else if entry.active_subagent_count > 0 || !entry.active_child_conversations.is_empty()
+            {
+                entry.status = Status::Working;
+                entry.current_action = if entry.active_subagent_count > 0 {
+                    format!("{} subagents running", entry.active_subagent_count)
+                } else {
+                    "Subagents finishing…".to_string()
+                };
+                return Some(session_id);
+            }
             entry.active_subagent_count = 0;
+            entry.active_child_conversations.clear();
             if let Some(msg) = p.get("last_assistant_message").and_then(|v| v.as_str()) {
                 entry.status = Status::Done;
                 let summary = extract_done_summary(msg);
@@ -672,6 +757,10 @@ pub fn apply(map: &mut HashMap<String, Session>, raw: RawEvent) -> Option<String
         _ => {
             // Unknown event: still useful as a heartbeat.
         }
+    }
+
+    if !raw_conv.is_empty() && raw_conv != session_id {
+        map.remove(&raw_conv);
     }
 
     Some(session_id)
@@ -1988,6 +2077,7 @@ fn truncate(s: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::SessionRouting;
 
     #[test]
     fn describe_bash_gh_issue_view() {
@@ -2146,6 +2236,7 @@ mod tests {
     fn apply_cursor_bom_string_payload_and_unknown_event() {
         let inner = r#"{"conversation_id":"c-bom","hook_event_name":"beforeSubmitPrompt","prompt":"hi","workspace_roots":["/C:/proj"]}"#;
         let mut map = HashMap::new();
+        let mut routing = SessionRouting::default();
         let raw = RawEvent {
             event: "unknown".to_string(),
             payload: serde_json::Value::String(format!("\u{FEFF}{inner}")),
@@ -2153,7 +2244,7 @@ mod tests {
             hook_pid: None,
             parent_pid: None,
         };
-        apply(&mut map, raw);
+        apply(&mut map, &mut routing, raw);
         let s = map.get("c-bom").expect("session created");
         assert_eq!(s.app, App::Cursor);
         assert_eq!(s.last_prompt, "hi");
@@ -2162,6 +2253,7 @@ mod tests {
     #[test]
     fn after_file_edit_accumulates_line_counts() {
         let mut map = HashMap::new();
+        let mut routing = SessionRouting::default();
         let raw = RawEvent {
             event: "afterFileEdit".to_string(),
             payload: serde_json::json!({
@@ -2175,7 +2267,7 @@ mod tests {
             hook_pid: None,
             parent_pid: None,
         };
-        apply(&mut map, raw);
+        apply(&mut map, &mut routing, raw);
         let s = map.get("c1").unwrap();
         assert_eq!(s.files_edited.len(), 1);
         assert_eq!(s.files_edited[0].1.adds, 3);
@@ -2186,6 +2278,7 @@ mod tests {
     #[test]
     fn stop_status_error_maps_to_errored() {
         let mut map = HashMap::new();
+        let mut routing = SessionRouting::default();
         let raw = RawEvent {
             event: "stop".to_string(),
             payload: serde_json::json!({
@@ -2197,7 +2290,7 @@ mod tests {
             hook_pid: None,
             parent_pid: None,
         };
-        apply(&mut map, raw);
+        apply(&mut map, &mut routing, raw);
         let s = map.get("c1").unwrap();
         assert_eq!(s.status, Status::Errored);
         assert_eq!(s.current_action, "Rate limited");
@@ -2206,6 +2299,7 @@ mod tests {
     #[test]
     fn stop_status_aborted_sets_stopped_summary() {
         let mut map = HashMap::new();
+        let mut routing = SessionRouting::default();
         let raw = RawEvent {
             event: "stop".to_string(),
             payload: serde_json::json!({
@@ -2216,7 +2310,7 @@ mod tests {
             hook_pid: None,
             parent_pid: None,
         };
-        apply(&mut map, raw);
+        apply(&mut map, &mut routing, raw);
         let s = map.get("c1").unwrap();
         assert_eq!(s.status, Status::Done);
         assert_eq!(s.done_summary.as_deref(), Some("Stopped"));
@@ -2225,8 +2319,10 @@ mod tests {
     #[test]
     fn subagent_start_stop_keeps_parent_working() {
         let mut map = HashMap::new();
+        let mut routing = SessionRouting::default();
         apply(
             &mut map,
+            &mut routing,
             RawEvent {
                 event: "subagentStart".to_string(),
                 payload: serde_json::json!({
@@ -2247,6 +2343,7 @@ mod tests {
 
         apply(
             &mut map,
+            &mut routing,
             RawEvent {
                 event: "subagentStop".to_string(),
                 payload: serde_json::json!({
@@ -2271,9 +2368,11 @@ mod tests {
     #[test]
     fn subagent_stop_parallel_count_label() {
         let mut map = HashMap::new();
+        let mut routing = SessionRouting::default();
         for ts in 1..=2 {
             apply(
                 &mut map,
+                &mut routing,
                 RawEvent {
                     event: "subagentStart".to_string(),
                     payload: serde_json::json!({
@@ -2289,6 +2388,7 @@ mod tests {
         }
         apply(
             &mut map,
+            &mut routing,
             RawEvent {
                 event: "subagentStop".to_string(),
                 payload: serde_json::json!({
@@ -2309,8 +2409,10 @@ mod tests {
     #[test]
     fn session_end_marks_done_without_stop() {
         let mut map = HashMap::new();
+        let mut routing = SessionRouting::default();
         apply(
             &mut map,
+            &mut routing,
             RawEvent {
                 event: "sessionEnd".to_string(),
                 payload: serde_json::json!({
@@ -2336,5 +2438,167 @@ mod tests {
             "parent_conversation_id": "parent"
         });
         assert_eq!(resolve_session_id(&p), "parent");
+    }
+
+    #[test]
+    fn task_spawn_links_orphan_child_conversation() {
+        let mut map = HashMap::new();
+        let mut routing = SessionRouting::default();
+        apply(
+            &mut map,
+            &mut routing,
+            RawEvent {
+                event: "preToolUse".to_string(),
+                payload: serde_json::json!({
+                    "conversation_id": "parent-1",
+                    "tool_name": "Task",
+                    "tool_input": { "run_in_background": true, "description": "explore auth" }
+                }),
+                ts: 1000,
+                hook_pid: None,
+                parent_pid: None,
+            },
+        );
+        apply(
+            &mut map,
+            &mut routing,
+            RawEvent {
+                event: "preToolUse".to_string(),
+                payload: serde_json::json!({
+                    "conversation_id": "child-orphan",
+                    "tool_name": "Grep",
+                    "tool_input": { "pattern": "auth" }
+                }),
+                ts: 2000,
+                hook_pid: None,
+                parent_pid: None,
+            },
+        );
+        assert!(map.get("child-orphan").is_none());
+        assert_eq!(routing.child_to_parent.get("child-orphan").map(String::as_str), Some("parent-1"));
+        let parent = map.get("parent-1").expect("parent session");
+        assert!(parent.current_action.contains("Grep") || parent.current_action.contains("auth"));
+    }
+
+    #[test]
+    fn stop_deferred_when_active_subagent_count() {
+        let mut map = HashMap::new();
+        let mut routing = SessionRouting::default();
+        apply(
+            &mut map,
+            &mut routing,
+            RawEvent {
+                event: "subagentStart".to_string(),
+                payload: serde_json::json!({
+                    "conversation_id": "parent-1",
+                    "parent_conversation_id": "parent-1",
+                    "subagent_type": "explore",
+                    "task": "scan routes"
+                }),
+                ts: 1,
+                hook_pid: None,
+                parent_pid: None,
+            },
+        );
+        apply(
+            &mut map,
+            &mut routing,
+            RawEvent {
+                event: "stop".to_string(),
+                payload: serde_json::json!({
+                    "conversation_id": "parent-1",
+                    "status": "completed"
+                }),
+                ts: 2,
+                hook_pid: None,
+                parent_pid: None,
+            },
+        );
+        let s = map.get("parent-1").unwrap();
+        assert_eq!(s.status, Status::Working);
+        assert_eq!(s.active_subagent_count, 1);
+        assert_eq!(s.current_action, "1 subagents running");
+    }
+
+    #[test]
+    fn stop_deferred_when_active_child_conversations() {
+        let mut map = HashMap::new();
+        let mut routing = SessionRouting::default();
+        routing.link_child("child-1", "parent-1");
+        apply(
+            &mut map,
+            &mut routing,
+            RawEvent {
+                event: "sessionStart".to_string(),
+                payload: serde_json::json!({
+                    "conversation_id": "parent-1",
+                    "workspace_roots": ["/proj"]
+                }),
+                ts: 1,
+                hook_pid: None,
+                parent_pid: None,
+            },
+        );
+        map.get_mut("parent-1")
+            .unwrap()
+            .active_child_conversations
+            .insert("child-1".to_string());
+        apply(
+            &mut map,
+            &mut routing,
+            RawEvent {
+                event: "stop".to_string(),
+                payload: serde_json::json!({
+                    "conversation_id": "parent-1",
+                    "status": "completed"
+                }),
+                ts: 2,
+                hook_pid: None,
+                parent_pid: None,
+            },
+        );
+        let s = map.get("parent-1").unwrap();
+        assert_eq!(s.status, Status::Working);
+        assert_eq!(s.current_action, "Subagents finishing…");
+    }
+
+    #[test]
+    fn child_events_roll_up_to_parent() {
+        let mut map = HashMap::new();
+        let mut routing = SessionRouting::default();
+        routing.link_child("child-1", "parent-1");
+        apply(
+            &mut map,
+            &mut routing,
+            RawEvent {
+                event: "sessionStart".to_string(),
+                payload: serde_json::json!({
+                    "conversation_id": "parent-1",
+                    "workspace_roots": ["/proj"]
+                }),
+                ts: 1,
+                hook_pid: None,
+                parent_pid: None,
+            },
+        );
+        apply(
+            &mut map,
+            &mut routing,
+            RawEvent {
+                event: "preToolUse".to_string(),
+                payload: serde_json::json!({
+                    "conversation_id": "child-1",
+                    "tool_name": "Read",
+                    "tool_input": { "path": "src/session.rs" }
+                }),
+                ts: 2,
+                hook_pid: None,
+                parent_pid: None,
+            },
+        );
+        assert!(map.get("child-1").is_none());
+        let parent = map.get("parent-1").unwrap();
+        assert_eq!(parent.status, Status::Working);
+        assert!(parent.current_action.contains("session.rs") || parent.current_action.contains("Read"));
     }
 }

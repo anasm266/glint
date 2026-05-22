@@ -69,7 +69,9 @@ async fn event(
 ) -> impl IntoResponse {
     tracing::debug!("event: {} payload={}", raw.event, raw.payload);
 
-    let touched = ctx.state.with_sessions(|map| session::apply(map, raw));
+    let touched = ctx
+        .state
+        .with_session_state(|map, routing| session::apply(map, routing, raw));
     if touched.is_some() {
         ctx.state.emit_snapshot(&ctx.app);
     }
