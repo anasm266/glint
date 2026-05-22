@@ -6,9 +6,8 @@
 // Hard constraints:
 //   - Must NEVER block the agent. 200ms hard timeout on the HTTP request,
 //     any error is swallowed silently.
-//   - Codex requires valid JSON on stdout for the `Stop` event. For every
-//     other event, exit 0 with no output. For `Stop` we emit `{}` which
-//     means "no decision, continue normally".
+//   - Codex only required JSON on stdout for `Stop`; Cursor parses stdout for
+//     every hook. We always emit `{}` (no decision, continue normally).
 
 use std::io::{Read, Write};
 use std::time::Duration;
@@ -44,9 +43,7 @@ fn main() {
 
     let _ = post_envelope(&envelope);
 
-    if event.eq_ignore_ascii_case("Stop") {
-        let _ = std::io::stdout().write_all(b"{}");
-    }
+    let _ = std::io::stdout().write_all(b"{}");
 }
 
 fn post_envelope(body: &serde_json::Value) -> Result<(), Box<dyn std::error::Error>> {

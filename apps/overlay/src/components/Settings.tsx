@@ -18,7 +18,7 @@ export default function Settings() {
     );
   }
 
-  const setConnected = async (next: boolean) => {
+  const setCodexConnected = async (next: boolean) => {
     setBusy(true);
     setError(null);
     try {
@@ -26,6 +26,24 @@ export default function Settings() {
         await invoke("install_codex_hooks");
       } else {
         await invoke("remove_codex_hooks");
+      }
+      const fresh = await invoke<SettingsDTO>("get_settings");
+      setS(fresh);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const setCursorConnected = async (next: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      if (next) {
+        await invoke("install_cursor_hooks");
+      } else {
+        await invoke("remove_cursor_hooks");
       }
       const fresh = await invoke<SettingsDTO>("get_settings");
       setS(fresh);
@@ -71,7 +89,30 @@ export default function Settings() {
           <Switch
             value={s.codexConnected}
             disabled={busy}
-            onChange={setConnected}
+            onChange={setCodexConnected}
+          />
+        </div>
+      </section>
+
+      <section className="flex flex-col gap-2">
+        <div className="flex items-center justify-between gap-4">
+          <div className="min-w-0">
+            <div className="text-value flex items-center gap-2">
+              Connect Cursor
+              {s.cursorConnected ? (
+                <span className="text-[10px] text-emerald-300/85 px-1.5 py-0.5 rounded bg-emerald-400/10 border border-emerald-400/20">
+                  connected
+                </span>
+              ) : null}
+            </div>
+            <div className="text-[11px] text-white/45 mt-0.5">
+              Writes hook entries into ~/.cursor/hooks.json. Restart Cursor after enabling.
+            </div>
+          </div>
+          <Switch
+            value={s.cursorConnected}
+            disabled={busy}
+            onChange={setCursorConnected}
           />
         </div>
       </section>

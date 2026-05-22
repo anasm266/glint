@@ -41,4 +41,5 @@ export interface SettingsDTO {
   corner: Corner;
   opacity: number;
   codexConnected: boolean;
+  cursorConnected: boolean;
 }

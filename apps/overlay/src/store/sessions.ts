@@ -27,12 +27,14 @@ interface SessionsState {
   sessions: SessionDTO[];
   corner: Corner;
   codexConnected: boolean;
+  cursorConnected: boolean;
   tempSelectedId: string | null;
   /** True while pointer is over the pill row or hover panel (debounced leave). */
   pillPanelHovered: boolean;
   setSessions: (s: SessionDTO[]) => void;
   setCorner: (c: Corner) => void;
   setCodexConnected: (v: boolean) => void;
+  setCursorConnected: (v: boolean) => void;
   tempSelect: (id: string) => void;
   clearTempSelect: () => void;
   setPillPanelHovered: (v: boolean) => void;
@@ -44,11 +46,13 @@ export const useSessions = create<SessionsState>((set, get) => ({
   sessions: [],
   corner: "tr",
   codexConnected: false,
+  cursorConnected: false,
   tempSelectedId: null,
   pillPanelHovered: false,
 
   setCorner: (corner) => set({ corner }),
   setCodexConnected: (codexConnected) => set({ codexConnected }),
+  setCursorConnected: (cursorConnected) => set({ cursorConnected }),
 
   setSessions: (next) => {
     const prev = get().sessions;

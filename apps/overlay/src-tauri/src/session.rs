@@ -106,11 +106,17 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(id: String, cwd: String, parent_pid: Option<u32>, ts_ms: u64) -> Self {
+    pub fn new(
+        id: String,
+        cwd: String,
+        app: App,
+        parent_pid: Option<u32>,
+        ts_ms: u64,
+    ) -> Self {
         let project = project_basename(&cwd);
         Self {
             id,
-            app: App::Codex,
+            app,
             project,
             cwd,
             status: Status::Working,
@@ -252,7 +258,13 @@ fn extract_user_prompt(p: &serde_json::Value) -> Option<String> {
     }
 
     // Fallback: longest top-level string that isn't a known structural field.
-    let structural: &[&str] = &["session_id", "cwd", "hook_event_name"];
+    let structural: &[&str] = &[
+        "session_id",
+        "conversation_id",
+        "cwd",
+        "hook_event_name",
+        "workspace_roots",
+    ];
     if let Some(obj) = p.as_object() {
         let best = obj
             .iter()
@@ -292,28 +304,126 @@ pub struct RawEvent {
     pub parent_pid: Option<u32>,
 }
 
+fn normalize_hook_event(name: &str) -> String {
+    match name {
+        "sessionStart" | "SessionStart" => "SessionStart".to_string(),
+        "stop" | "Stop" => "Stop".to_string(),
+        "preToolUse" | "PreToolUse" => "PreToolUse".to_string(),
+        "postToolUse" | "PostToolUse" => "PostToolUse".to_string(),
+        "beforeSubmitPrompt" | "UserPromptSubmit" => "UserPromptSubmit".to_string(),
+        "afterFileEdit" | "AfterFileEdit" => "AfterFileEdit".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn resolve_session_id(p: &serde_json::Value) -> String {
+    p.get("conversation_id")
+        .or_else(|| p.get("session_id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+fn resolve_cwd(p: &serde_json::Value) -> String {
+    if let Some(cwd) = p.get("cwd").and_then(|v| v.as_str()) {
+        if !cwd.is_empty() {
+            return cwd.to_string();
+        }
+    }
+    p.get("workspace_roots")
+        .and_then(|v| v.as_array())
+        .and_then(|a| a.first())
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+fn detect_app(p: &serde_json::Value) -> App {
+    if p.get("conversation_id").and_then(|v| v.as_str()).is_some() {
+        App::Cursor
+    } else {
+        App::Codex
+    }
+}
+
+fn turn_id_from_payload(p: &serde_json::Value) -> &str {
+    p.get("turn_id")
+        .or_else(|| p.get("generation_id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+}
+
+fn tool_response_str<'a>(p: &'a serde_json::Value) -> &'a str {
+    if let Some(s) = p.get("tool_response").and_then(|v| v.as_str()) {
+        return s;
+    }
+    p.get("tool_output").and_then(|v| v.as_str()).unwrap_or("")
+}
+
+fn path_from_tool_input(input: Option<&serde_json::Value>) -> Option<String> {
+    let obj = input?.as_object()?;
+    for key in ["path", "file_path", "filePath", "target"] {
+        if let Some(s) = obj.get(key).and_then(|v| v.as_str()) {
+            if !s.is_empty() {
+                return Some(s.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn apply_after_file_edit(entry: &mut Session, p: &serde_json::Value, ts: u64) {
+    let path = p
+        .get("file_path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if path.is_empty() {
+        return;
+    }
+    let mut adds = 0u32;
+    let mut dels = 0u32;
+    if let Some(edits) = p.get("edits").and_then(|v| v.as_array()) {
+        for edit in edits {
+            if let Some(old) = edit.get("old_string").and_then(|v| v.as_str()) {
+                dels += old.lines().count() as u32;
+            }
+            if let Some(new) = edit.get("new_string").and_then(|v| v.as_str()) {
+                adds += new.lines().count() as u32;
+            }
+        }
+    }
+    let stat = entry.files_edited_map.entry(path.to_string()).or_default();
+    stat.adds = stat.adds.saturating_add(adds);
+    stat.dels = stat.dels.saturating_add(dels);
+    entry.flatten_files();
+
+    let label = format!("Edited {}", basename(path));
+    entry.current_action = label.clone();
+    entry.push_activity_with_kind(label, ts, ActivityKind::Normal, "");
+}
+
 /// Apply a raw event to the session map. Returns the session id that was
 /// affected (if any) so callers can do follow-up work.
 pub fn apply(map: &mut HashMap<String, Session>, raw: RawEvent) -> Option<String> {
     let p = &raw.payload;
-    let session_id = p
-        .get("session_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    let session_id = resolve_session_id(p);
     if session_id.is_empty() {
         return None;
     }
 
-    let cwd = p
-        .get("cwd")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    let cwd = resolve_cwd(p);
+    let app = detect_app(p);
+    let event = normalize_hook_event(&raw.event);
 
-    let entry = map
-        .entry(session_id.clone())
-        .or_insert_with(|| Session::new(session_id.clone(), cwd.clone(), raw.parent_pid, raw.ts));
+    let entry = map.entry(session_id.clone()).or_insert_with(|| {
+        Session::new(
+            session_id.clone(),
+            cwd.clone(),
+            app,
+            raw.parent_pid,
+            raw.ts,
+        )
+    });
 
     if entry.cwd.is_empty() && !cwd.is_empty() {
         entry.cwd = cwd.clone();
@@ -328,7 +438,7 @@ pub fn apply(map: &mut HashMap<String, Session>, raw: RawEvent) -> Option<String
         entry.model = model.to_string();
     }
 
-    match raw.event.as_str() {
+    match event.as_str() {
         "SessionStart" => {
             entry.status = Status::Working;
             entry.current_action = "Thinking…".to_string();
@@ -362,7 +472,7 @@ pub fn apply(map: &mut HashMap<String, Session>, raw: RawEvent) -> Option<String
         "PreToolUse" => {
             entry.status = Status::Working;
             let tool = p.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
-            if tool == "Bash" {
+            if tool == "Bash" || tool == "Shell" {
                 let cmd = p
                     .get("tool_input")
                     .and_then(|v| v.get("command"))
@@ -371,13 +481,13 @@ pub fn apply(map: &mut HashMap<String, Session>, raw: RawEvent) -> Option<String
                 entry.last_bash_command = cmd.to_string();
             }
             let action = describe_pre_tool(p);
-            let turn_id = p.get("turn_id").and_then(|v| v.as_str()).unwrap_or("");
+            let turn_id = turn_id_from_payload(p);
             if !entry.turn_activity_turn_id.is_empty() && turn_id != entry.turn_activity_turn_id {
                 let flush_tid = entry.turn_activity_turn_id.clone();
                 entry.flush_turn_activity(raw.ts, flush_tid.as_str());
             }
             if !action.is_empty() {
-                let dedupe_key = if tool == "Bash" {
+                let dedupe_key = if tool == "Bash" || tool == "Shell" {
                     activity_dedupe_key(&entry.last_bash_command)
                 } else {
                     action.clone()
@@ -408,11 +518,8 @@ pub fn apply(map: &mut HashMap<String, Session>, raw: RawEvent) -> Option<String
             entry.flush_turn_activity(raw.ts, flush_tid.as_str());
             track_files_from_post(entry, p);
             let tool = p.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
-            let response = p
-                .get("tool_response")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if tool == "Bash" {
+            let response = tool_response_str(p);
+            if tool == "Bash" || tool == "Shell" {
                 parse_gh_pr_post(entry, response, raw.ts);
                 parse_gh_issue_post(entry, response, raw.ts);
                 parse_rg_post(entry, response, raw.ts);
@@ -443,8 +550,8 @@ pub fn apply(map: &mut HashMap<String, Session>, raw: RawEvent) -> Option<String
         "Stop" => {
             let flush_tid = entry.turn_activity_turn_id.clone();
             entry.flush_turn_activity(raw.ts, flush_tid.as_str());
-            entry.status = Status::Done;
             if let Some(msg) = p.get("last_assistant_message").and_then(|v| v.as_str()) {
+                entry.status = Status::Done;
                 let summary = extract_done_summary(msg);
                 if !summary.is_empty() {
                     entry.done_summary = Some(summary.clone());
@@ -452,10 +559,40 @@ pub fn apply(map: &mut HashMap<String, Session>, raw: RawEvent) -> Option<String
                 } else {
                     entry.current_action = "Done".to_string();
                 }
+            } else if let Some(status) = p.get("status").and_then(|v| v.as_str()) {
+                match status {
+                    "completed" => {
+                        entry.status = Status::Done;
+                        entry.current_action = "Done".to_string();
+                    }
+                    "aborted" => {
+                        entry.status = Status::Done;
+                        entry.done_summary = Some("Stopped".to_string());
+                        entry.current_action = "Stopped".to_string();
+                    }
+                    "error" => {
+                        entry.status = Status::Errored;
+                        let msg = p
+                            .get("error_message")
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or("Error");
+                        entry.done_summary = Some(msg.to_string());
+                        entry.current_action = msg.to_string();
+                    }
+                    _ => {
+                        entry.status = Status::Done;
+                        entry.current_action = "Done".to_string();
+                    }
+                }
             } else {
+                entry.status = Status::Done;
                 entry.current_action = "Done".to_string();
             }
             entry.flatten_files();
+        }
+        "AfterFileEdit" => {
+            apply_after_file_edit(entry, p, raw.ts);
         }
         _ => {
             // Unknown event: still useful as a heartbeat.
@@ -474,7 +611,7 @@ fn describe_pre_tool(p: &serde_json::Value) -> String {
     let input = p.get("tool_input");
 
     match tool {
-        "Bash" => {
+        "Bash" | "Shell" => {
             let cmd = input
                 .and_then(|v| v.get("command"))
                 .and_then(|v| v.as_str())
@@ -483,6 +620,20 @@ fn describe_pre_tool(p: &serde_json::Value) -> String {
                 "Running command".to_string()
             } else {
                 describe_bash(cmd)
+            }
+        }
+        "Read" => {
+            if let Some(path) = path_from_tool_input(input) {
+                format!("Reading: {}", truncate(&basename(&path), 56))
+            } else {
+                "Reading file".to_string()
+            }
+        }
+        "Write" => {
+            if let Some(path) = path_from_tool_input(input) {
+                format!("Editing: {}", truncate(&basename(&path), 56))
+            } else {
+                "Editing file".to_string()
             }
         }
         "apply_patch" => {
@@ -510,7 +661,7 @@ fn track_files_from_post(s: &mut Session, p: &serde_json::Value) {
         .get("tool_name")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    if tool != "apply_patch" {
+    if tool != "apply_patch" && tool != "Write" {
         return;
     }
     let patch = p
@@ -1653,7 +1804,7 @@ mod tests {
 
     #[test]
     fn parse_gh_issue_post_pushes_activity() {
-        let mut s = Session::new("t".into(), "/tmp".into(), None, 0);
+        let mut s = Session::new("t".into(), "/tmp".into(), App::Codex, None, 0);
         let json = r#"{"number":8737,"title":"Bug report","state":"closed"}"#;
         parse_gh_issue_post(&mut s, json, 1);
         assert_eq!(s.recent_activity.len(), 1);
@@ -1663,7 +1814,7 @@ mod tests {
 
     #[test]
     fn parse_rg_post_counts_matches() {
-        let mut s = Session::new("t".into(), "/tmp".into(), None, 0);
+        let mut s = Session::new("t".into(), "/tmp".into(), App::Codex, None, 0);
         let out = "src/a.ts:10: match one\nsrc/a.ts:20: match two\n";
         parse_rg_post(&mut s, out, 1);
         assert_eq!(s.recent_activity.len(), 1);
@@ -1675,5 +1826,101 @@ mod tests {
         let log_out = "a1b2c3d Fix something\n";
         assert!(parse_commit_hash(log_out).is_some());
         assert!(!should_parse_commit_hash("git log --oneline"));
+    }
+
+    #[test]
+    fn normalize_hook_event_maps_cursor_names() {
+        assert_eq!(normalize_hook_event("sessionStart"), "SessionStart");
+        assert_eq!(normalize_hook_event("stop"), "Stop");
+        assert_eq!(normalize_hook_event("afterFileEdit"), "AfterFileEdit");
+        assert_eq!(normalize_hook_event("UnknownThing"), "UnknownThing");
+    }
+
+    #[test]
+    fn resolve_session_id_prefers_conversation_id() {
+        let p = serde_json::json!({
+            "conversation_id": "conv-1",
+            "session_id": "sess-2"
+        });
+        assert_eq!(resolve_session_id(&p), "conv-1");
+    }
+
+    #[test]
+    fn resolve_cwd_from_workspace_roots() {
+        let p = serde_json::json!({
+            "workspace_roots": ["/home/user/proj"]
+        });
+        assert_eq!(resolve_cwd(&p), "/home/user/proj");
+    }
+
+    #[test]
+    fn detect_app_cursor_vs_codex() {
+        let cursor = serde_json::json!({ "conversation_id": "c1", "session_id": "s1" });
+        let codex = serde_json::json!({ "session_id": "s1" });
+        assert_eq!(detect_app(&cursor), App::Cursor);
+        assert_eq!(detect_app(&codex), App::Codex);
+    }
+
+    #[test]
+    fn after_file_edit_accumulates_line_counts() {
+        let mut map = HashMap::new();
+        let raw = RawEvent {
+            event: "afterFileEdit".to_string(),
+            payload: serde_json::json!({
+                "conversation_id": "c1",
+                "file_path": "src/lib.rs",
+                "edits": [
+                    { "old_string": "line1\nline2\n", "new_string": "line1\nline2\nline3\n" }
+                ]
+            }),
+            ts: 100,
+            hook_pid: None,
+            parent_pid: None,
+        };
+        apply(&mut map, raw);
+        let s = map.get("c1").unwrap();
+        assert_eq!(s.files_edited.len(), 1);
+        assert_eq!(s.files_edited[0].1.adds, 3);
+        assert_eq!(s.files_edited[0].1.dels, 2);
+        assert!(s.recent_activity[0].summary.contains("lib.rs"));
+    }
+
+    #[test]
+    fn stop_status_error_maps_to_errored() {
+        let mut map = HashMap::new();
+        let raw = RawEvent {
+            event: "stop".to_string(),
+            payload: serde_json::json!({
+                "conversation_id": "c1",
+                "status": "error",
+                "error_message": "Rate limited"
+            }),
+            ts: 1,
+            hook_pid: None,
+            parent_pid: None,
+        };
+        apply(&mut map, raw);
+        let s = map.get("c1").unwrap();
+        assert_eq!(s.status, Status::Errored);
+        assert_eq!(s.current_action, "Rate limited");
+    }
+
+    #[test]
+    fn stop_status_aborted_sets_stopped_summary() {
+        let mut map = HashMap::new();
+        let raw = RawEvent {
+            event: "stop".to_string(),
+            payload: serde_json::json!({
+                "conversation_id": "c1",
+                "status": "aborted"
+            }),
+            ts: 1,
+            hook_pid: None,
+            parent_pid: None,
+        };
+        apply(&mut map, raw);
+        let s = map.get("c1").unwrap();
+        assert_eq!(s.status, Status::Done);
+        assert_eq!(s.done_summary.as_deref(), Some("Stopped"));
     }
 }

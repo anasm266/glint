@@ -9,6 +9,7 @@ export default function App() {
   const setSessions = useSessions((s) => s.setSessions);
   const setCorner = useSessions((s) => s.setCorner);
   const setCodexConnected = useSessions((s) => s.setCodexConnected);
+  const setCursorConnected = useSessions((s) => s.setCursorConnected);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -18,6 +19,7 @@ export default function App() {
       .then((st) => {
         setCorner(st.corner);
         setCodexConnected(st.codexConnected);
+        setCursorConnected(st.cursorConnected);
       })
       .catch(() => {});
 
@@ -30,7 +32,7 @@ export default function App() {
     return () => {
       unlisten?.();
     };
-  }, [setSessions, setCorner, setCodexConnected]);
+  }, [setSessions, setCorner, setCodexConnected, setCursorConnected]);
 
   return <CompactView />;
 }

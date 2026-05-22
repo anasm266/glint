@@ -27,6 +27,7 @@ pub struct Settings {
     pub corner: Corner,
     pub opacity: f32,
     pub codex_connected: bool,
+    pub cursor_connected: bool,
 }
 
 impl Default for Settings {
@@ -35,6 +36,7 @@ impl Default for Settings {
             corner: Corner::Tr,
             opacity: 0.85,
             codex_connected: false,
+            cursor_connected: false,
         }
     }
 }
