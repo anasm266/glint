@@ -13,6 +13,7 @@ mod tray;
 mod win;
 
 use std::sync::Arc;
+use std::time::Duration;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
 pub use state::AppState;
@@ -77,6 +78,18 @@ pub fn run() {
 
             // Push initial empty snapshot so the frontend has something to bind to.
             state.emit_snapshot(&handle);
+
+            // Apply deferred parent stops when hooks go idle (no further events).
+            let sweep_state = state.clone();
+            let sweep_app = handle.clone();
+            std::thread::spawn(move || {
+                loop {
+                    std::thread::sleep(Duration::from_secs(5));
+                    if sweep_state.sweep_pending_stops() {
+                        sweep_state.emit_snapshot(&sweep_app);
+                    }
+                }
+            });
 
             Ok(())
         })
