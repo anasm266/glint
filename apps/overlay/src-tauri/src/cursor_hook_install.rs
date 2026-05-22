@@ -9,11 +9,14 @@ use std::path::{Path, PathBuf};
 const MANAGED_KEY: &str = "overlay_managed";
 const EVENTS: &[&str] = &[
     "sessionStart",
+    "sessionEnd",
     "stop",
     "preToolUse",
     "postToolUse",
     "beforeSubmitPrompt",
     "afterFileEdit",
+    "subagentStart",
+    "subagentStop",
 ];
 
 pub fn config_path() -> Result<PathBuf> {
@@ -195,9 +198,13 @@ mod tests {
     use super::*;
     use std::env;
 
-    fn temp_hooks_path() -> PathBuf {
+    fn temp_hooks_path(label: &str) -> PathBuf {
         let mut dir = env::temp_dir();
-        dir.push(format!("overlay-cursor-hooks-{}", std::process::id()));
+        dir.push(format!(
+            "overlay-cursor-hooks-{}-{}",
+            std::process::id(),
+            label
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         dir.push("hooks.json");
         dir
@@ -205,7 +212,7 @@ mod tests {
 
     #[test]
     fn install_remove_roundtrip() {
-        let path = temp_hooks_path();
+        let path = temp_hooks_path("roundtrip");
         let _ = std::fs::remove_file(&path);
         let hook = PathBuf::from("C:/tools/overlay-hook.exe");
         install_at(&path, &hook).unwrap();
@@ -213,6 +220,8 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("overlay-hook"));
         assert!(text.contains("sessionStart"));
+        assert!(text.contains("sessionEnd"));
+        assert!(text.contains("subagentStop"));
         assert!(text.contains("afterFileEdit"));
         remove_at(&path).unwrap();
         assert!(!is_installed_at(&path));
@@ -221,7 +230,7 @@ mod tests {
 
     #[test]
     fn preserves_user_hooks() {
-        let path = temp_hooks_path();
+        let path = temp_hooks_path("preserve");
         let user = json!({
             "version": 1,
             "hooks": {
