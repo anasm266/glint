@@ -72,6 +72,32 @@ struct BufferedActivity {
     dedupe_key: String,
 }
 
+#[derive(Debug, Clone)]
+struct PendingStop {
+    last_assistant_message: Option<String>,
+    status: Option<String>,
+    error_message: Option<String>,
+}
+
+impl PendingStop {
+    fn from_payload(p: &serde_json::Value) -> Self {
+        Self {
+            last_assistant_message: p
+                .get("last_assistant_message")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            status: p
+                .get("status")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            error_message: p
+                .get("error_message")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Session {
@@ -110,6 +136,9 @@ pub struct Session {
     /// Child conversation ids linked to this parent (multitask rollup).
     #[serde(skip)]
     pub active_child_conversations: HashSet<String>,
+    /// Parent `stop` deferred until subagents/children quiesce.
+    #[serde(skip)]
+    pending_stop: Option<PendingStop>,
 }
 
 impl Session {
@@ -146,6 +175,7 @@ impl Session {
             files_edited_map: HashMap::new(),
             active_subagent_count: 0,
             active_child_conversations: HashSet::new(),
+            pending_stop: None,
         }
     }
 
@@ -367,7 +397,106 @@ fn unlink_child(
         return;
     }
     routing.remove_child(child_id);
+    routing.child_last_event_ms.remove(child_id);
     entry.active_child_conversations.remove(child_id);
+}
+
+fn track_child_activity(
+    routing: &mut SessionRouting,
+    entry: &mut Session,
+    child_id: &str,
+    parent_id: &str,
+    ts: u64,
+) {
+    if child_id.is_empty() || child_id == parent_id {
+        return;
+    }
+    routing.touch_child(child_id, ts);
+    entry.active_child_conversations.insert(child_id.to_string());
+}
+
+fn refresh_action_label(entry: &mut Session) {
+    if entry.status == Status::Done || entry.status == Status::Errored {
+        return;
+    }
+    if entry.active_subagent_count > 0 {
+        entry.current_action = format!("{} subagents running", entry.active_subagent_count);
+        return;
+    }
+    if !entry.active_child_conversations.is_empty() {
+        entry.current_action = "Subagents finishing…".to_string();
+        return;
+    }
+    if entry.current_action != "Thinking…" && !entry.current_action.is_empty() {
+        return;
+    }
+    if let Some(first) = entry.recent_activity.first() {
+        entry.current_action = truncate(&first.summary, 40);
+    } else {
+        entry.current_action = "Thinking…".to_string();
+    }
+}
+
+fn apply_pending_stop(entry: &mut Session, pending: &PendingStop) {
+    entry.pending_stop = None;
+    entry.active_subagent_count = 0;
+    entry.active_child_conversations.clear();
+    if let Some(msg) = pending.last_assistant_message.as_deref() {
+        entry.status = Status::Done;
+        let summary = extract_done_summary(msg);
+        if !summary.is_empty() {
+            entry.done_summary = Some(summary.clone());
+            entry.current_action = summary;
+        } else {
+            entry.current_action = "Done".to_string();
+        }
+    } else if let Some(status) = pending.status.as_deref() {
+        match status {
+            "completed" => {
+                entry.status = Status::Done;
+                entry.current_action = "Done".to_string();
+            }
+            "aborted" => {
+                entry.status = Status::Done;
+                entry.done_summary = Some("Stopped".to_string());
+                entry.current_action = "Stopped".to_string();
+            }
+            "error" => {
+                entry.status = Status::Errored;
+                let msg = pending
+                    .error_message
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("Error");
+                entry.done_summary = Some(msg.to_string());
+                entry.current_action = msg.to_string();
+            }
+            _ => {
+                entry.status = Status::Done;
+                entry.current_action = "Done".to_string();
+            }
+        }
+    } else {
+        entry.status = Status::Done;
+        entry.current_action = "Done".to_string();
+    }
+}
+
+fn try_complete_pending_stop(
+    routing: &mut SessionRouting,
+    entry: &mut Session,
+    ts: u64,
+) -> bool {
+    if entry.pending_stop.is_none() {
+        return false;
+    }
+    routing.prune_stale_children(entry, ts);
+    if entry.active_subagent_count > 0 || !entry.active_child_conversations.is_empty() {
+        return false;
+    }
+    let pending = entry.pending_stop.take().expect("checked");
+    apply_pending_stop(entry, &pending);
+    true
 }
 
 fn resolve_cwd(p: &serde_json::Value) -> String {
@@ -538,6 +667,7 @@ pub fn apply(
             entry.done_summary = None;
             entry.active_subagent_count = 0;
             entry.active_child_conversations.clear();
+            entry.pending_stop = None;
         }
         "UserPromptSubmit" => {
             entry.status = Status::Working;
@@ -552,6 +682,7 @@ pub fn apply(
             entry.done_summary = None;
             entry.active_subagent_count = 0;
             entry.active_child_conversations.clear();
+            entry.pending_stop = None;
             if let Some(prompt) = extract_user_prompt(p) {
                 let t = prompt.trim();
                 if !t.is_empty() {
@@ -638,7 +769,7 @@ pub fn apply(
                     }
                 }
             }
-            entry.current_action = "Thinking…".to_string();
+            refresh_action_label(entry);
         }
         "SubagentStart" => {
             entry.status = Status::Working;
@@ -652,7 +783,7 @@ pub fn apply(
                 && raw_conv != parent_conv
             {
                 routing.link_child(&raw_conv, &session_id);
-                entry.active_child_conversations.insert(raw_conv.clone());
+                track_child_activity(routing, entry, &raw_conv, &session_id, raw.ts);
             }
             entry.active_subagent_count = entry.active_subagent_count.saturating_add(1);
             let action = describe_subagent_start(p);
@@ -671,24 +802,28 @@ pub fn apply(
             entry.status = Status::Working;
             let (summary, kind) = describe_subagent_stop(p);
             if !summary.is_empty() {
-                entry.push_activity_with_kind(summary, raw.ts, kind, "");
+                entry.push_activity_with_kind(summary.clone(), raw.ts, kind, "");
             }
-            entry.current_action = if entry.active_subagent_count > 0 {
-                format!("{} subagents running", entry.active_subagent_count)
-            } else if !entry.active_child_conversations.is_empty() {
-                "Subagents finishing…".to_string()
+            if entry.active_subagent_count > 0 {
+                entry.current_action =
+                    format!("{} subagents running", entry.active_subagent_count);
+            } else if !summary.is_empty() {
+                entry.current_action = truncate(&summary, 40);
             } else {
-                "Thinking…".to_string()
-            };
+                refresh_action_label(entry);
+            }
+            let _ = try_complete_pending_stop(routing, entry, raw.ts);
         }
         "SessionEnd" => {
             let flush_tid = entry.turn_activity_turn_id.clone();
             entry.flush_turn_activity(raw.ts, flush_tid.as_str());
             if raw_conv != session_id {
                 unlink_child(routing, entry, &raw_conv, &session_id);
+                let _ = try_complete_pending_stop(routing, entry, raw.ts);
             } else {
                 entry.active_subagent_count = 0;
                 entry.active_child_conversations.clear();
+                entry.pending_stop = None;
             }
             apply_session_end(entry, p);
             entry.flatten_files();
@@ -698,56 +833,23 @@ pub fn apply(
             entry.flush_turn_activity(raw.ts, flush_tid.as_str());
             if raw_conv != session_id {
                 unlink_child(routing, entry, &raw_conv, &session_id);
-            } else if entry.active_subagent_count > 0 || !entry.active_child_conversations.is_empty()
-            {
-                entry.status = Status::Working;
-                entry.current_action = if entry.active_subagent_count > 0 {
-                    format!("{} subagents running", entry.active_subagent_count)
-                } else {
-                    "Subagents finishing…".to_string()
-                };
-                return Some(session_id);
-            }
-            entry.active_subagent_count = 0;
-            entry.active_child_conversations.clear();
-            if let Some(msg) = p.get("last_assistant_message").and_then(|v| v.as_str()) {
-                entry.status = Status::Done;
-                let summary = extract_done_summary(msg);
-                if !summary.is_empty() {
-                    entry.done_summary = Some(summary.clone());
-                    entry.current_action = summary;
-                } else {
-                    entry.current_action = "Done".to_string();
-                }
-            } else if let Some(status) = p.get("status").and_then(|v| v.as_str()) {
-                match status {
-                    "completed" => {
-                        entry.status = Status::Done;
-                        entry.current_action = "Done".to_string();
-                    }
-                    "aborted" => {
-                        entry.status = Status::Done;
-                        entry.done_summary = Some("Stopped".to_string());
-                        entry.current_action = "Stopped".to_string();
-                    }
-                    "error" => {
-                        entry.status = Status::Errored;
-                        let msg = p
-                            .get("error_message")
-                            .and_then(|v| v.as_str())
-                            .filter(|s| !s.is_empty())
-                            .unwrap_or("Error");
-                        entry.done_summary = Some(msg.to_string());
-                        entry.current_action = msg.to_string();
-                    }
-                    _ => {
-                        entry.status = Status::Done;
-                        entry.current_action = "Done".to_string();
-                    }
-                }
+                let _ = try_complete_pending_stop(routing, entry, raw.ts);
             } else {
-                entry.status = Status::Done;
-                entry.current_action = "Done".to_string();
+                routing.prune_stale_children(entry, raw.ts);
+                if entry.active_subagent_count > 0 || !entry.active_child_conversations.is_empty()
+                {
+                    entry.pending_stop = Some(PendingStop::from_payload(p));
+                    entry.status = Status::Working;
+                    refresh_action_label(entry);
+                    if !try_complete_pending_stop(routing, entry, raw.ts) {
+                        return Some(session_id);
+                    }
+                } else {
+                    entry.pending_stop = None;
+                    entry.active_subagent_count = 0;
+                    entry.active_child_conversations.clear();
+                    apply_pending_stop(entry, &PendingStop::from_payload(p));
+                }
             }
             entry.flatten_files();
         }
@@ -758,6 +860,12 @@ pub fn apply(
             // Unknown event: still useful as a heartbeat.
         }
     }
+
+    if !raw_conv.is_empty() && raw_conv != session_id {
+        track_child_activity(routing, entry, &raw_conv, &session_id, raw.ts);
+    }
+
+    let _ = try_complete_pending_stop(routing, entry, raw.ts);
 
     if !raw_conv.is_empty() && raw_conv != session_id {
         map.remove(&raw_conv);
@@ -2360,7 +2468,7 @@ mod tests {
         let s = map.get("parent-1").unwrap();
         assert_eq!(s.status, Status::Working);
         assert_eq!(s.active_subagent_count, 0);
-        assert_eq!(s.current_action, "Thinking…");
+        assert!(s.current_action.contains("Subagent done"));
         assert_eq!(s.recent_activity.len(), 1);
         assert!(s.recent_activity[0].summary.contains("Subagent done"));
     }
@@ -2543,6 +2651,7 @@ mod tests {
             .unwrap()
             .active_child_conversations
             .insert("child-1".to_string());
+        routing.touch_child("child-1", 2);
         apply(
             &mut map,
             &mut routing,
@@ -2560,6 +2669,145 @@ mod tests {
         let s = map.get("parent-1").unwrap();
         assert_eq!(s.status, Status::Working);
         assert_eq!(s.current_action, "Subagents finishing…");
+    }
+
+    #[test]
+    fn parent_stop_completes_done_after_child_stop() {
+        let mut map = HashMap::new();
+        let mut routing = SessionRouting::default();
+        routing.link_child("child-1", "parent-1");
+        apply(
+            &mut map,
+            &mut routing,
+            RawEvent {
+                event: "sessionStart".to_string(),
+                payload: serde_json::json!({
+                    "conversation_id": "parent-1",
+                    "workspace_roots": ["/proj"]
+                }),
+                ts: 1,
+                hook_pid: None,
+                parent_pid: None,
+            },
+        );
+        map.get_mut("parent-1")
+            .unwrap()
+            .active_child_conversations
+            .insert("child-1".to_string());
+        routing.touch_child("child-1", 2);
+        apply(
+            &mut map,
+            &mut routing,
+            RawEvent {
+                event: "stop".to_string(),
+                payload: serde_json::json!({
+                    "conversation_id": "parent-1",
+                    "status": "completed"
+                }),
+                ts: 2,
+                hook_pid: None,
+                parent_pid: None,
+            },
+        );
+        assert_eq!(map.get("parent-1").unwrap().status, Status::Working);
+        apply(
+            &mut map,
+            &mut routing,
+            RawEvent {
+                event: "stop".to_string(),
+                payload: serde_json::json!({
+                    "conversation_id": "child-1",
+                    "status": "completed"
+                }),
+                ts: 3,
+                hook_pid: None,
+                parent_pid: None,
+            },
+        );
+        let s = map.get("parent-1").unwrap();
+        assert_eq!(s.status, Status::Done);
+        assert_eq!(s.current_action, "Done");
+    }
+
+    #[test]
+    fn nested_child_events_roll_up_to_root_parent() {
+        let mut map = HashMap::new();
+        let mut routing = SessionRouting::default();
+        routing.link_child("worker-1", "parent-1");
+        routing.note_task_spawn("parent-1", 1000);
+        apply(
+            &mut map,
+            &mut routing,
+            RawEvent {
+                event: "sessionStart".to_string(),
+                payload: serde_json::json!({
+                    "conversation_id": "parent-1",
+                    "workspace_roots": ["/proj"]
+                }),
+                ts: 1000,
+                hook_pid: None,
+                parent_pid: None,
+            },
+        );
+        apply(
+            &mut map,
+            &mut routing,
+            RawEvent {
+                event: "preToolUse".to_string(),
+                payload: serde_json::json!({
+                    "conversation_id": "explore-1",
+                    "tool_name": "Grep",
+                    "tool_input": { "pattern": "rollup" }
+                }),
+                ts: 2000,
+                hook_pid: None,
+                parent_pid: None,
+            },
+        );
+        assert!(map.get("explore-1").is_none());
+        assert_eq!(
+            routing.child_to_parent.get("explore-1").map(String::as_str),
+            Some("parent-1")
+        );
+        let parent = map.get("parent-1").unwrap();
+        assert!(parent.current_action.contains("Grep") || parent.current_action.contains("rollup"));
+    }
+
+    #[test]
+    fn post_tool_use_keeps_pre_tool_action_on_pill() {
+        let mut map = HashMap::new();
+        let mut routing = SessionRouting::default();
+        apply(
+            &mut map,
+            &mut routing,
+            RawEvent {
+                event: "preToolUse".to_string(),
+                payload: serde_json::json!({
+                    "conversation_id": "c1",
+                    "tool_name": "Read",
+                    "tool_input": { "path": "src/session.rs" }
+                }),
+                ts: 1,
+                hook_pid: None,
+                parent_pid: None,
+            },
+        );
+        apply(
+            &mut map,
+            &mut routing,
+            RawEvent {
+                event: "postToolUse".to_string(),
+                payload: serde_json::json!({
+                    "conversation_id": "c1",
+                    "tool_name": "Read"
+                }),
+                ts: 2,
+                hook_pid: None,
+                parent_pid: None,
+            },
+        );
+        let s = map.get("c1").unwrap();
+        assert!(s.current_action.contains("session.rs") || s.current_action.contains("Read"));
     }
 
     #[test]

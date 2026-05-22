@@ -15,7 +15,9 @@ export default function PrimaryLine({
   doneQueueCount?: number;
 }) {
   const action =
-    session.status === "done" ? doneAction(session) : session.currentAction;
+    session.status === "done"
+      ? doneAction(session)
+      : truncateAction(session.currentAction);
 
   const showQueue = doneQueueCount > 1;
 
@@ -36,6 +38,13 @@ export default function PrimaryLine({
       </span>
     </div>
   );
+}
+
+function truncateAction(action: string): string {
+  const t = action.trim();
+  if (!t) return "Thinking…";
+  if (t.length <= 40) return t;
+  return `${t.slice(0, 39)}…`;
 }
 
 function doneAction(s: SessionDTO): string {

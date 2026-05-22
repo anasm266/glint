@@ -7,6 +7,8 @@ use tauri::{AppHandle, Emitter};
 use crate::session::Session;
 
 pub const SPAWN_LINK_WINDOW_MS: u64 = 120_000;
+/// Drop child conversations with no rollup events for this long.
+pub const CHILD_QUIESCE_MS: u64 = 20_000;
 
 /// Maps child conversation ids to parent sessions for multitask rollup.
 #[derive(Debug, Default)]
@@ -14,6 +16,8 @@ pub struct SessionRouting {
     pub child_to_parent: HashMap<String, String>,
     /// Parent session id -> timestamp ms until which orphan children may link.
     pub spawn_window_until_ms: HashMap<String, u64>,
+    /// Last rollup event timestamp per child conversation id.
+    pub child_last_event_ms: HashMap<String, u64>,
 }
 
 impl SessionRouting {
@@ -28,13 +32,40 @@ impl SessionRouting {
         self.child_to_parent.remove(child);
     }
 
-    pub fn note_task_spawn(&mut self, parent_id: &str, ts: u64) {
+    pub fn note_task_spawn(&mut self, session_id: &str, ts: u64) {
+        let parent_id = self.resolve_root(session_id);
         if parent_id.is_empty() {
             return;
         }
         let until = ts.saturating_add(SPAWN_LINK_WINDOW_MS);
         self.spawn_window_until_ms
             .insert(parent_id.to_string(), until);
+    }
+
+    pub fn resolve_root(&self, id: &str) -> String {
+        let mut current = id.to_string();
+        for _ in 0..32 {
+            match self.child_to_parent.get(&current) {
+                Some(p) if !p.is_empty() && p != &current => current = p.clone(),
+                _ => break,
+            }
+        }
+        current
+    }
+
+    pub fn touch_child(&mut self, child: &str, ts: u64) {
+        if !child.is_empty() {
+            self.child_last_event_ms.insert(child.to_string(), ts);
+        }
+    }
+
+    pub fn prune_stale_children(&self, entry: &mut crate::session::Session, ts: u64) {
+        entry.active_child_conversations.retain(|child| {
+            self.child_last_event_ms
+                .get(child)
+                .map(|last| ts.saturating_sub(*last) <= CHILD_QUIESCE_MS)
+                .unwrap_or(false)
+        });
     }
 
     /// Pick the parent with the most recent active Task spawn window.
@@ -47,25 +78,32 @@ impl SessionRouting {
                 }
             }
         }
-        best.map(|(p, _)| p)
+        best.map(|(p, _)| self.resolve_root(&p))
     }
 
     pub fn resolve_parent(&self, raw_conv: &str, p: &serde_json::Value) -> String {
-        if let Some(parent) = self.child_to_parent.get(raw_conv) {
-            return parent.clone();
-        }
-        if let Some(parent) = p.get("parent_conversation_id").and_then(|v| v.as_str()) {
+        let mut id = if let Some(parent) = self.child_to_parent.get(raw_conv) {
+            parent.clone()
+        } else if let Some(parent) = p.get("parent_conversation_id").and_then(|v| v.as_str()) {
             if !parent.is_empty() && parent != raw_conv {
-                return parent.to_string();
+                parent.to_string()
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+        if id.is_empty() {
+            if !raw_conv.is_empty() {
+                id = raw_conv.to_string();
+            } else {
+                id = p.get("session_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
             }
         }
-        if !raw_conv.is_empty() {
-            return raw_conv.to_string();
-        }
-        p.get("session_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string()
+        self.resolve_root(&id)
     }
 
     pub fn active_children(&self, parent_id: &str, sessions: &HashMap<String, Session>) -> usize {
