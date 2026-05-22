@@ -139,6 +139,9 @@ pub struct Session {
     /// Parent `stop` deferred until subagents/children quiesce.
     #[serde(skip)]
     pending_stop: Option<PendingStop>,
+    /// Parent composer turn ended (`stop` received); late rollup child hooks may still arrive.
+    #[serde(skip)]
+    turn_finished: bool,
 }
 
 impl Session {
@@ -176,6 +179,7 @@ impl Session {
             active_subagent_count: 0,
             active_child_conversations: HashSet::new(),
             pending_stop: None,
+            turn_finished: false,
         }
     }
 
@@ -399,6 +403,36 @@ fn unlink_child(
     routing.remove_child(child_id);
     routing.child_last_event_ms.remove(child_id);
     entry.active_child_conversations.remove(child_id);
+}
+
+fn is_child_rollup(raw_conv: &str, session_id: &str) -> bool {
+    !raw_conv.is_empty() && raw_conv != session_id
+}
+
+/// Keep parent in a finishing state after `stop`; do not reopen the turn on rollup child hooks.
+fn set_working_if_active_turn(entry: &mut Session, raw_conv: &str, session_id: &str) {
+    if entry.turn_finished && is_child_rollup(raw_conv, session_id) {
+        return;
+    }
+    entry.status = Status::Working;
+}
+
+/// Parent `stop` already ran but a linked child conversation emitted another hook.
+fn reopen_finish_if_late_rollup(entry: &mut Session, raw_conv: &str, session_id: &str) {
+    if !entry.turn_finished || !is_child_rollup(raw_conv, session_id) {
+        return;
+    }
+    if entry.pending_stop.is_none() {
+        entry.pending_stop = Some(PendingStop {
+            last_assistant_message: None,
+            status: Some("completed".to_string()),
+            error_message: None,
+        });
+    }
+    if entry.status == Status::Done {
+        entry.status = Status::Working;
+        refresh_action_label(entry);
+    }
 }
 
 fn track_child_activity(
@@ -678,6 +712,7 @@ pub fn apply(
 
     match event.as_str() {
         "SessionStart" => {
+            entry.turn_finished = false;
             entry.status = Status::Working;
             entry.current_action = "Thinking…".to_string();
             entry.acknowledged_done = false;
@@ -693,10 +728,13 @@ pub fn apply(
             entry.pending_stop = None;
         }
         "UserPromptSubmit" => {
+            entry.turn_finished = false;
             entry.status = Status::Working;
             entry.current_action = "Thinking…".to_string();
             entry.acknowledged_done = false;
-            entry.started_at_ms = raw.ts;
+            if raw_conv == session_id || raw_conv.is_empty() {
+                entry.started_at_ms = raw.ts;
+            }
             entry.last_prompt = String::new();
             entry.recent_activity.clear();
             entry.next_activity_seq = 0;
@@ -714,7 +752,7 @@ pub fn apply(
             }
         }
         "PreToolUse" => {
-            entry.status = Status::Working;
+            set_working_if_active_turn(entry, &raw_conv, &session_id);
             let tool = p.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
             if task_run_in_background(p) {
                 routing.note_task_spawn(&session_id, raw.ts);
@@ -795,7 +833,7 @@ pub fn apply(
             refresh_action_label(entry);
         }
         "SubagentStart" => {
-            entry.status = Status::Working;
+            set_working_if_active_turn(entry, &raw_conv, &session_id);
             entry.acknowledged_done = false;
             let parent_conv = p
                 .get("parent_conversation_id")
@@ -823,7 +861,7 @@ pub fn apply(
             entry.active_subagent_count = entry.active_subagent_count.saturating_sub(1);
             unlink_child(routing, entry, &raw_conv, &session_id);
             routing.prune_stale_children(entry, raw.ts);
-            entry.status = Status::Working;
+            set_working_if_active_turn(entry, &raw_conv, &session_id);
             let (summary, kind) = describe_subagent_stop(p);
             if !summary.is_empty() {
                 entry.push_activity_with_kind(summary.clone(), raw.ts, kind, "");
@@ -859,21 +897,12 @@ pub fn apply(
                 unlink_child(routing, entry, &raw_conv, &session_id);
                 let _ = try_complete_pending_stop(routing, entry, raw.ts);
             } else {
+                entry.turn_finished = true;
+                entry.pending_stop = Some(PendingStop::from_payload(p));
                 routing.prune_stale_children(entry, raw.ts);
-                if entry.active_subagent_count > 0 || !entry.active_child_conversations.is_empty()
-                {
-                    entry.pending_stop = Some(PendingStop::from_payload(p));
-                    entry.status = Status::Working;
-                    refresh_action_label(entry);
-                    if !try_complete_pending_stop(routing, entry, raw.ts) {
-                        return Some(session_id);
-                    }
-                } else {
-                    entry.pending_stop = None;
-                    entry.active_subagent_count = 0;
-                    entry.active_child_conversations.clear();
-                    apply_pending_stop(entry, &PendingStop::from_payload(p));
-                }
+                entry.status = Status::Working;
+                refresh_action_label(entry);
+                let _ = try_complete_pending_stop(routing, entry, raw.ts);
             }
             entry.flatten_files();
         }
@@ -886,8 +915,12 @@ pub fn apply(
     }
 
     if !raw_conv.is_empty() && raw_conv != session_id {
-        track_child_activity(routing, entry, &raw_conv, &session_id, raw.ts);
-        routing.prune_stale_children(entry, raw.ts);
+        let child_lifecycle_end = matches!(event.as_str(), "Stop" | "SessionEnd");
+        if !child_lifecycle_end {
+            track_child_activity(routing, entry, &raw_conv, &session_id, raw.ts);
+            routing.prune_stale_children(entry, raw.ts);
+            reopen_finish_if_late_rollup(entry, &raw_conv, &session_id);
+        }
     }
 
     let _ = try_complete_pending_stop(routing, entry, raw.ts);
@@ -2991,5 +3024,69 @@ mod tests {
         assert_eq!(parent.status, Status::Done);
         assert_eq!(parent.current_action, "Done");
         assert!(!parent.active_child_conversations.contains("explore-1"));
+    }
+
+    #[test]
+    fn parent_stop_then_late_child_rollup_reaches_done_via_sweep() {
+        let mut map = HashMap::new();
+        let mut routing = SessionRouting::default();
+        routing.note_task_spawn("parent-1", 1_000);
+        apply(
+            &mut map,
+            &mut routing,
+            RawEvent {
+                event: "sessionStart".to_string(),
+                payload: serde_json::json!({
+                    "conversation_id": "parent-1",
+                    "workspace_roots": ["/proj"]
+                }),
+                ts: 1_000,
+                hook_pid: None,
+                parent_pid: None,
+            },
+        );
+        apply(
+            &mut map,
+            &mut routing,
+            RawEvent {
+                event: "stop".to_string(),
+                payload: serde_json::json!({
+                    "conversation_id": "parent-1",
+                    "status": "completed"
+                }),
+                ts: 2_000,
+                hook_pid: None,
+                parent_pid: None,
+            },
+        );
+        let parent = map.get("parent-1").unwrap();
+        assert!(parent.turn_finished);
+        assert_eq!(parent.status, Status::Done);
+
+        apply(
+            &mut map,
+            &mut routing,
+            RawEvent {
+                event: "preToolUse".to_string(),
+                payload: serde_json::json!({
+                    "conversation_id": "explore-late",
+                    "tool_name": "Grep",
+                    "tool_input": { "pattern": "x" }
+                }),
+                ts: 5_000,
+                hook_pid: None,
+                parent_pid: None,
+            },
+        );
+        let parent = map.get("parent-1").unwrap();
+        assert!(parent.turn_finished);
+        assert!(parent.pending_stop.is_some());
+        assert!(parent.active_child_conversations.contains("explore-late"));
+
+        assert!(reconcile_pending_stops(&mut map, &mut routing, 26_000));
+        let parent = map.get("parent-1").unwrap();
+        assert_eq!(parent.status, Status::Done);
+        assert_eq!(parent.current_action, "Done");
+        assert!(parent.turn_finished);
     }
 }
