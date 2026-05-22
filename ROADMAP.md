@@ -4,23 +4,22 @@ Near-term polish for the Codex-only build, before Cursor support. Items are orde
 
 ---
 
-## 1. Compact strip: fleet bar + primary line (full target)
+## 1. Compact strip: fleet bar + primary line
 
-This section records the **intended** UX for the always-visible pill. Today's build only implements a subset; the rest is polish / v0.2.
+**Shipped in v0.1 dogfood:** fleet dots (8 + overflow), temp select on dot click, auto primary priority (error → unacked Done → recent), done queue prefix on primary line, hover card with activity feed + Done file list + assistant summary, ack via **Dismiss** and ~7s removal.
+
+**Still open** (see subsections below):
 
 ### Fleet bar (left)
 
 - One **small dot per active session**, colored by state so you can read "3 working, 1 done, 1 errored" at a glance.
 - Size the strip so **about 5–8** sessions fit comfortably in the dot row.
-- If there are more sessions than fit, collapse the overflow to **`●●● +4`** (a few dots + count of hidden ones).
+- If there are more sessions than fit, collapse the overflow to **`+N`** count of hidden sessions.
 
 ### Fleet bar dots — interactive
 
-Dots are not just indicators; they are the primary navigation control for multi-session workflows.
-
-- **Single click** a dot → switches the primary line to show that session's info and focuses its Codex window. Selection is **temporary**: auto-priority resumes once that session ends or the user clicks outside the overlay.
-- **Double click** a dot → **pins** that session as primary until it ends or the user double-clicks it again to unpin. A subtle ring around the pinned dot shows which session is locked.
-- **Hover** a dot → the expanded panel opens anchored to that specific session, not the auto-priority primary.
+- **Single click** a dot → temporary primary selection (ring); clears on overlay blur. Does **not** focus Codex (use hover **Open Codex**).
+- **Hover** pill or bar → expanded panel for the current primary session.
 
 ### Primary line (right)
 
@@ -39,21 +38,17 @@ When a dot is **pinned** (double-clicked), the primary line is locked to that se
 
 ### Ack-to-dismiss
 
-- A session's "Done, pending review" state is cleared when the user **focuses its Codex window** — via single-clicking its dot, or via the OS (manually switching to Codex).
-- Until acknowledged, Done stays visually distinct (green dot / tint) so nothing gets silently missed.
+- **Dismiss** in the hover card (or equivalent command) sets `acknowledgedDone`; Done tint stays until ack.
+- Optional later: also ack when user focuses Codex from outside the overlay.
 
-### Fleet bar: expire finished sessions after focus
+### Fleet bar: expire finished sessions after ack
 
-After Done + acknowledge, the dot should leave the fleet bar cleanly.
+**Shipped:** ~7s timer after ack, then `remove_session`; dot exit animation via Framer Motion.
 
-- Remove acknowledged dots with a **smooth staggered animation** (~300–500ms each), bar shrinks when empty.
-- A short **5–10 second delay** after the acknowledging click before removal prevents accidental disappearance on stray clicks (tunable).
-- If some sessions are still working, finished dots can disappear on ack independently — no need to wait for the full fleet to be idle.
+**Polish still open:**
 
-**Technical notes**
-
-- Today `acknowledged_done` is set on focus in `focus_session`; the UI still lists the session. Need a **third state**: "done, acknowledged, pending removal" — remove from `SessionStore` after the animation delay.
-- Framer Motion already used in fleet bar — reuse for exit transitions.
+- Staggered exit when multiple Done sessions ack in a row.
+- Tune delay (currently 7s fixed in `sessions.ts`).
 
 ---
 

@@ -4,13 +4,13 @@ A translucent always-on-top Windows overlay that shows live state of your AI cod
 
 ## Status
 
-v0.1 — Milestone A. Codex Desktop only. **Compact pill** plus an **expanded hover detail** when you point at a session dot. Dogfood build.
+v0.1 — Milestone A. Codex Desktop only. **Compact pill** plus an **expanded hover detail** when you point at the pill or fleet dots. Dogfood build.
 
-Near-term polish is tracked in [ROADMAP.md](ROADMAP.md). Hover-specific behavior is also summarized in [HOVER_PANEL.md](HOVER_PANEL.md).
+Near-term polish is tracked in [ROADMAP.md](ROADMAP.md). Hover panel layout and activity feed behavior are summarized in [HOVER_PANEL.md](HOVER_PANEL.md).
 
 ## What it does today
 
-### Compact pill (380×52, corner from Settings)
+### Compact pill (380×60 collapsed, corner from Settings)
 
 - **Fleet bar** — One dot per Codex session (up to eight visible, then `+N` overflow). Dots reflect status: idle, working, done, errored (working dots use a subtle pulse).
 - **Primary line** — App label (`Codex`), project folder name, and the current action (`Editing …`, `Running: …`, or a **Done** summary with diff totals when the run has finished).
@@ -18,22 +18,24 @@ Near-term polish is tracked in [ROADMAP.md](ROADMAP.md). Hover-specific behavior
 - **Status badge** — Elapsed time while working; **just now** / **ago** after Done.
 - **Hooks disconnected hint** — If Codex hooks are not installed, the pill shows **Connect Codex to get started** (click opens Settings). When sessions exist but hooks are still off, a small **hollow amber dot** appears after the fleet; click it to open Settings.
 
-Click the **pill body** (not on a dot) to focus the Codex window for whichever session the **primary line** is showing, and to clear a temporary dot selection. The window is draggable (`data-tauri-drag-region`). **Tray:** Show, Settings…, Quit. **Single instance** — launching again focuses the existing overlay.
+**Primary selection** — Auto-priority: errored → unacknowledged Done → most recently active. **Single-click a fleet dot** to temporarily switch the primary line to that session (clears when the overlay loses focus). Clicking the pill body clears that temporary selection.
 
-### Fleet bar interactions
-
-- **Single-click a dot** — Temporarily treats that session as primary, focuses its Codex window, and runs the same acknowledge flow as the pill click **only when that session is Done** (so in-progress runs are not removed after focus).
-- **Double-click a dot** — Pins that session as primary until you double-click again to unpin or the session disappears. Pinned and temp-selected dots show distinct rings.
-- **Hover a dot** — Expands the native window vertically and opens a **detail card** below or above the pill (depending on corner). Moving the pointer into the card keeps it open; leaving the dot or card collapses after a short delay.
+The pill row is draggable (`data-tauri-drag-region`). **Tray:** Show, Settings…, Quit. **Single instance** — launching again focuses the existing overlay.
 
 ### Hover detail card
 
-- **Last prompt** — When Codex sends `UserPromptSubmit`, the user message is stored and shown (up to two lines, full text in a tooltip).
-- **While working** — Current action line plus **N files touched so far** once patch activity has produced file entries.
-- **When Done** — Scrollable list of **files** with per-file `+adds / −dels`, plus a compact totals footer. If nothing was patched, it says **Done — no files changed**.
-- **Time row** — Click to toggle between **elapsed** (e.g. `Running 4m 20s`, `Finished 2m ago`) and **clock** (e.g. `Started 9:42 AM`, `Finished at 9:46 AM`, with yesterday / date when needed).
+Opens when the pointer is over the pill or fleet bar (expands the window to ~380×300). The card is **interactive** — buttons do not steal drag from the pill.
 
-After you focus a **Done** session (dot or pill), it is marked acknowledged; **about seven seconds later** the session is removed from the overlay so the fleet stays tidy.
+- **Context row** — `You asked: …` from the last `UserPromptSubmit` (truncated; full text in tooltip), or **New session**. Right side: `project · Codex` and model name when known.
+- **While working** — Bold `currentAction` from the latest `PreToolUse` (patch targets, bash labels, MCP tools). Below that, a short **activity feed** (up to eight recent lines) built from hook events:
+  - Per-turn buffer: parallel tool calls in one turn flush as `Parallel: A · B · C` (with `+N more` when capped).
+  - Bash commands are classified (git, npm/cargo, rg, gh, PowerShell `Get-Content` ranges, heredoc/pipe-to-node, etc.) with dedupe within a turn.
+  - `PostToolUse` adds lines for test results (green/red), ripgrep matches, git log/blame, `gh` PR/issue JSON, node `CASE:` probes, and commit hashes when the last bash was a commit/push-style command.
+  - Repeated identical summaries in the same turn bump a `×N` counter on the newest line.
+- **When Done** — Prefer a one- or two-line **assistant summary** from `Stop` when present; otherwise diff totals and a scrollable per-file list (`basename` + `+adds / −dels`), or **No files changed** / **Pushed {hash}** when only a commit was recorded.
+- **Action strip** — Elapsed label (`Running …` / `Finished …`; hover title shows absolute start/finish time). **Open Codex** and **Dismiss** (acknowledges Done without focusing) as appropriate.
+
+Acknowledged Done sessions are removed from the fleet after about **seven seconds** (scheduled in the frontend when `acknowledgedDone` flips true).
 
 ### Settings
 
@@ -57,6 +59,8 @@ Codex session
      v
 overlay-hook.exe  -- POST http://127.0.0.1:47611/event (200ms fire-and-forget) -->  overlay-app.exe
 ```
+
+Hook events are normalized in `apps/overlay/src-tauri/src/session.rs` (`Session::apply`): status, `currentAction`, file diffs, `recentActivity`, `doneSummary`, `lastPrompt`, model, and commit hash hints. The UI polls/streams snapshots via Tauri commands.
 
 If `overlay-app.exe` is closed or crashed, the hook POST times out in 200ms and the Codex session is never blocked.
 
@@ -86,7 +90,7 @@ cd apps\overlay
 npm run app:build
 ```
 
-The unpacked `overlay-app.exe` and an `.msi` end up under `apps\overlay\src-tauri\target\release\bundle\`. The release `overlay-hook.exe` is at `target\release\overlay-hook.exe` (workspace root). For "live with it for a day" testing, run the unpacked overlay-app.exe directly; the hook installer will resolve the hook binary path correctly via `current_exe()`.
+The unpacked `overlay-app.exe` and an `.msi` end up under `apps/overlay\src-tauri\target\release\bundle\`. The release `overlay-hook.exe` is at `target\release\overlay-hook.exe` (workspace root). For "live with it for a day" testing, run the unpacked overlay-app.exe directly; the hook installer will resolve the hook binary path correctly via `current_exe()`.
 
 ## Folder layout
 
@@ -125,9 +129,9 @@ The `overlay_managed = true` marker is what `Disconnect Codex` uses to find and 
 2. Tray icon shows up; `Quit` exits cleanly; `Settings…` opens settings window.
 3. Toggling `Connect Codex` writes the five hook entries into `~/.codex/config.toml`, preserves user content, and disconnect removes them cleanly.
 4. With Codex Desktop running and a fresh prompt, a session row appears within about a second of the first hook firing.
-5. As Codex works, the primary line updates (`Editing X`, `Running: Y`) and elapsed time ticks.
-6. On `Stop`, the row shows Done styling with diff scope when available; the hover card lists touched files.
-7. Clicking the pill or a fleet dot focuses the Codex Desktop window for that session; Done sessions are acknowledged on focus and drop off the fleet after the delay.
+5. As Codex works, the primary line updates (`Editing X`, `Running: Y`) and elapsed time ticks; the hover card shows activity lines when tools run.
+6. On `Stop`, the row shows Done styling with diff scope when available; the hover card lists touched files or an assistant summary.
+7. **Open Codex** / **Dismiss** in the hover card focus Codex or acknowledge Done; acknowledged sessions drop off the fleet after the delay.
 8. Killing `overlay-app.exe` mid-session does not interfere with Codex (hook calls time out in 200ms, agent continues).
 9. Single-instance lock prevents a second copy from launching.
 
