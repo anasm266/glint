@@ -130,7 +130,7 @@ The `overlay_managed = true` marker is what disconnect uses to find and remove o
 
 ## Cursor hook config written by "Connect Cursor"
 
-User-level `~/.cursor/hooks.json` — six events: `sessionStart`, `stop`, `preToolUse`, `postToolUse`, `beforeSubmitPrompt`, `afterFileEdit`. Each entry is `{ "command": "<abs path>/overlay-hook.exe", "overlay_managed": true }`. The hook strips a leading UTF-8 BOM on Windows stdin, reads `hook_event_name` from JSON (camelCase), and `session.rs` normalizes to the same internal event names as Codex.
+User-level `~/.cursor/hooks.json` — nine events: `sessionStart`, `sessionEnd`, `stop`, `preToolUse`, `postToolUse`, `beforeSubmitPrompt`, `afterFileEdit`, `subagentStart`, `subagentStop`. Each entry is `{ "command": "<abs path>/overlay-hook.exe", "overlay_managed": true }`. The hook strips a leading UTF-8 BOM on Windows stdin, reads `hook_event_name` from JSON (camelCase), and `session.rs` normalizes to the same internal event names as Codex. **Multitask / background subagents:** `subagentStop` does not mark Done (parent may still be working); `sessionEnd` and `stop` do.
 
 ### Payload differences (Cursor vs Codex)
 

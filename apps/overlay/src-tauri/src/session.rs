@@ -103,6 +103,9 @@ pub struct Session {
     pub parent_pid: Option<u32>,
     #[serde(skip)]
     pub files_edited_map: HashMap<String, DiffStat>,
+    /// Background Task subagents still running (Cursor multitask).
+    #[serde(skip)]
+    pub active_subagent_count: u32,
 }
 
 impl Session {
@@ -137,6 +140,7 @@ impl Session {
             next_activity_seq: 0,
             parent_pid,
             files_edited_map: HashMap::new(),
+            active_subagent_count: 0,
         }
     }
 
@@ -307,16 +311,24 @@ pub struct RawEvent {
 fn normalize_hook_event(name: &str) -> String {
     match name {
         "sessionStart" | "SessionStart" => "SessionStart".to_string(),
+        "sessionEnd" | "SessionEnd" => "SessionEnd".to_string(),
         "stop" | "Stop" => "Stop".to_string(),
         "preToolUse" | "PreToolUse" => "PreToolUse".to_string(),
         "postToolUse" | "PostToolUse" => "PostToolUse".to_string(),
         "beforeSubmitPrompt" | "UserPromptSubmit" => "UserPromptSubmit".to_string(),
         "afterFileEdit" | "AfterFileEdit" => "AfterFileEdit".to_string(),
+        "subagentStart" | "SubagentStart" => "SubagentStart".to_string(),
+        "subagentStop" | "SubagentStop" => "SubagentStop".to_string(),
         other => other.to_string(),
     }
 }
 
 fn resolve_session_id(p: &serde_json::Value) -> String {
+    if let Some(parent) = p.get("parent_conversation_id").and_then(|v| v.as_str()) {
+        if !parent.is_empty() {
+            return parent.to_string();
+        }
+    }
     p.get("conversation_id")
         .or_else(|| p.get("session_id"))
         .and_then(|v| v.as_str())
@@ -476,6 +488,7 @@ pub fn apply(map: &mut HashMap<String, Session>, raw: RawEvent) -> Option<String
             entry.turn_activity_entries.clear();
             entry.turn_activity_turn_id.clear();
             entry.done_summary = None;
+            entry.active_subagent_count = 0;
         }
         "UserPromptSubmit" => {
             entry.status = Status::Working;
@@ -488,6 +501,7 @@ pub fn apply(map: &mut HashMap<String, Session>, raw: RawEvent) -> Option<String
             entry.turn_activity_entries.clear();
             entry.turn_activity_turn_id.clear();
             entry.done_summary = None;
+            entry.active_subagent_count = 0;
             if let Some(prompt) = extract_user_prompt(p) {
                 let t = prompt.trim();
                 if !t.is_empty() {
@@ -573,9 +587,44 @@ pub fn apply(map: &mut HashMap<String, Session>, raw: RawEvent) -> Option<String
             }
             entry.current_action = "Thinking…".to_string();
         }
+        "SubagentStart" => {
+            entry.status = Status::Working;
+            entry.acknowledged_done = false;
+            entry.active_subagent_count = entry.active_subagent_count.saturating_add(1);
+            let action = describe_subagent_start(p);
+            if !action.is_empty() {
+                entry.current_action = action;
+            } else if entry.active_subagent_count > 1 {
+                entry.current_action =
+                    format!("{} subagents running", entry.active_subagent_count);
+            }
+        }
+        "SubagentStop" => {
+            let flush_tid = entry.turn_activity_turn_id.clone();
+            entry.flush_turn_activity(raw.ts, flush_tid.as_str());
+            entry.active_subagent_count = entry.active_subagent_count.saturating_sub(1);
+            entry.status = Status::Working;
+            let (summary, kind) = describe_subagent_stop(p);
+            if !summary.is_empty() {
+                entry.push_activity_with_kind(summary, raw.ts, kind, "");
+            }
+            entry.current_action = if entry.active_subagent_count > 0 {
+                format!("{} subagents running", entry.active_subagent_count)
+            } else {
+                "Thinking…".to_string()
+            };
+        }
+        "SessionEnd" => {
+            let flush_tid = entry.turn_activity_turn_id.clone();
+            entry.flush_turn_activity(raw.ts, flush_tid.as_str());
+            entry.active_subagent_count = 0;
+            apply_session_end(entry, p);
+            entry.flatten_files();
+        }
         "Stop" => {
             let flush_tid = entry.turn_activity_turn_id.clone();
             entry.flush_turn_activity(raw.ts, flush_tid.as_str());
+            entry.active_subagent_count = 0;
             if let Some(msg) = p.get("last_assistant_message").and_then(|v| v.as_str()) {
                 entry.status = Status::Done;
                 let summary = extract_done_summary(msg);
@@ -626,6 +675,101 @@ pub fn apply(map: &mut HashMap<String, Session>, raw: RawEvent) -> Option<String
     }
 
     Some(session_id)
+}
+
+fn humanize_subagent_type(t: &str) -> &str {
+    match t {
+        "generalPurpose" => "agent",
+        "explore" => "explore",
+        "shell" => "shell",
+        "best-of-n-runner" => "runner",
+        other => other,
+    }
+}
+
+fn describe_subagent_start(p: &serde_json::Value) -> String {
+    let sub_type = p
+        .get("subagent_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("subagent");
+    let task = p
+        .get("task")
+        .or_else(|| p.get("description"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if task.is_empty() {
+        format!("Subagent: {}", humanize_subagent_type(sub_type))
+    } else {
+        format!(
+            "Subagent ({}): {}",
+            humanize_subagent_type(sub_type),
+            truncate(task, 48)
+        )
+    }
+}
+
+fn describe_subagent_stop(p: &serde_json::Value) -> (String, ActivityKind) {
+    let status = p.get("status").and_then(|v| v.as_str()).unwrap_or("completed");
+    let sub_type = p
+        .get("subagent_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("subagent");
+    let summary = p
+        .get("summary")
+        .or_else(|| p.get("description"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let kind = match status {
+        "error" => ActivityKind::Failure,
+        _ => ActivityKind::Success,
+    };
+    let label = if !summary.is_empty() {
+        format!(
+            "Subagent done ({}): {}",
+            humanize_subagent_type(sub_type),
+            truncate(summary, 56)
+        )
+    } else {
+        match status {
+            "error" => format!("Subagent failed ({})", humanize_subagent_type(sub_type)),
+            "aborted" => format!("Subagent stopped ({})", humanize_subagent_type(sub_type)),
+            _ => format!("Subagent finished ({})", humanize_subagent_type(sub_type)),
+        }
+    };
+    (label, kind)
+}
+
+fn apply_session_end(entry: &mut Session, p: &serde_json::Value) {
+    match p.get("reason").and_then(|v| v.as_str()) {
+        Some("error") => {
+            entry.status = Status::Errored;
+            let msg = p
+                .get("error_message")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("Error");
+            entry.done_summary = Some(msg.to_string());
+            entry.current_action = msg.to_string();
+        }
+        Some("aborted" | "window_close" | "user_close") => {
+            entry.status = Status::Done;
+            entry.done_summary = Some("Stopped".to_string());
+            entry.current_action = "Stopped".to_string();
+        }
+        _ => {
+            entry.status = Status::Done;
+            if let Some(status) = p.get("final_status").and_then(|v| v.as_str()) {
+                if !status.is_empty() {
+                    entry.done_summary = Some(truncate(status, 100));
+                    entry.current_action = entry.done_summary.clone().unwrap_or_default();
+                } else {
+                    entry.current_action = "Done".to_string();
+                }
+            } else {
+                entry.current_action = "Done".to_string();
+            }
+        }
+    }
 }
 
 fn describe_pre_tool(p: &serde_json::Value) -> String {
@@ -1965,8 +2109,11 @@ mod tests {
     #[test]
     fn normalize_hook_event_maps_cursor_names() {
         assert_eq!(normalize_hook_event("sessionStart"), "SessionStart");
+        assert_eq!(normalize_hook_event("sessionEnd"), "SessionEnd");
         assert_eq!(normalize_hook_event("stop"), "Stop");
         assert_eq!(normalize_hook_event("afterFileEdit"), "AfterFileEdit");
+        assert_eq!(normalize_hook_event("subagentStart"), "SubagentStart");
+        assert_eq!(normalize_hook_event("subagentStop"), "SubagentStop");
         assert_eq!(normalize_hook_event("UnknownThing"), "UnknownThing");
     }
 
@@ -2073,5 +2220,121 @@ mod tests {
         let s = map.get("c1").unwrap();
         assert_eq!(s.status, Status::Done);
         assert_eq!(s.done_summary.as_deref(), Some("Stopped"));
+    }
+
+    #[test]
+    fn subagent_start_stop_keeps_parent_working() {
+        let mut map = HashMap::new();
+        apply(
+            &mut map,
+            RawEvent {
+                event: "subagentStart".to_string(),
+                payload: serde_json::json!({
+                    "conversation_id": "parent-1",
+                    "parent_conversation_id": "parent-1",
+                    "subagent_type": "explore",
+                    "task": "Find auth middleware"
+                }),
+                ts: 1,
+                hook_pid: None,
+                parent_pid: None,
+            },
+        );
+        let s = map.get("parent-1").unwrap();
+        assert_eq!(s.status, Status::Working);
+        assert_eq!(s.active_subagent_count, 1);
+        assert!(s.current_action.contains("explore"));
+
+        apply(
+            &mut map,
+            RawEvent {
+                event: "subagentStop".to_string(),
+                payload: serde_json::json!({
+                    "conversation_id": "parent-1",
+                    "subagent_type": "explore",
+                    "status": "completed",
+                    "summary": "Found middleware in src/auth"
+                }),
+                ts: 2,
+                hook_pid: None,
+                parent_pid: None,
+            },
+        );
+        let s = map.get("parent-1").unwrap();
+        assert_eq!(s.status, Status::Working);
+        assert_eq!(s.active_subagent_count, 0);
+        assert_eq!(s.current_action, "Thinking…");
+        assert_eq!(s.recent_activity.len(), 1);
+        assert!(s.recent_activity[0].summary.contains("Subagent done"));
+    }
+
+    #[test]
+    fn subagent_stop_parallel_count_label() {
+        let mut map = HashMap::new();
+        for ts in 1..=2 {
+            apply(
+                &mut map,
+                RawEvent {
+                    event: "subagentStart".to_string(),
+                    payload: serde_json::json!({
+                        "conversation_id": "p",
+                        "subagent_type": "shell",
+                        "task": format!("task {ts}")
+                    }),
+                    ts,
+                    hook_pid: None,
+                    parent_pid: None,
+                },
+            );
+        }
+        apply(
+            &mut map,
+            RawEvent {
+                event: "subagentStop".to_string(),
+                payload: serde_json::json!({
+                    "conversation_id": "p",
+                    "subagent_type": "shell",
+                    "status": "completed"
+                }),
+                ts: 3,
+                hook_pid: None,
+                parent_pid: None,
+            },
+        );
+        let s = map.get("p").unwrap();
+        assert_eq!(s.active_subagent_count, 1);
+        assert_eq!(s.current_action, "1 subagents running");
+    }
+
+    #[test]
+    fn session_end_marks_done_without_stop() {
+        let mut map = HashMap::new();
+        apply(
+            &mut map,
+            RawEvent {
+                event: "sessionEnd".to_string(),
+                payload: serde_json::json!({
+                    "session_id": "sess-9",
+                    "conversation_id": "sess-9",
+                    "reason": "completed",
+                    "final_status": "All tasks finished"
+                }),
+                ts: 10,
+                hook_pid: None,
+                parent_pid: None,
+            },
+        );
+        let s = map.get("sess-9").unwrap();
+        assert_eq!(s.status, Status::Done);
+        assert_eq!(s.done_summary.as_deref(), Some("All tasks finished"));
+    }
+
+    #[test]
+    fn resolve_session_id_prefers_parent_conversation_id() {
+        let p = serde_json::json!({
+            "conversation_id": "child",
+            "parent_conversation_id": "parent"
+        });
+        assert_eq!(resolve_session_id(&p), "parent");
     }
 }
