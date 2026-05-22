@@ -31,6 +31,16 @@ pub struct DiffStat {
     pub dels: u32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivityEntry {
+    pub seq: u64,
+    pub at_ms: u64,
+    pub summary: String,
+}
+
+const MAX_ACTIVITY_ENTRIES: usize = 8;
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Session {
@@ -45,6 +55,9 @@ pub struct Session {
     pub acknowledged_done: bool,
     pub last_prompt: String,
     pub files_edited: Vec<(String, DiffStat)>,
+    pub recent_activity: Vec<ActivityEntry>,
+    #[serde(skip)]
+    pub next_activity_seq: u64,
     #[serde(skip)]
     pub parent_pid: Option<u32>,
     #[serde(skip)]
@@ -66,8 +79,35 @@ impl Session {
             acknowledged_done: false,
             last_prompt: String::new(),
             files_edited: vec![],
+            recent_activity: vec![],
+            next_activity_seq: 0,
             parent_pid,
             files_edited_map: HashMap::new(),
+        }
+    }
+
+    pub fn push_activity(&mut self, summary: String, at_ms: u64) {
+        if summary.is_empty() {
+            return;
+        }
+        if self
+            .recent_activity
+            .first()
+            .is_some_and(|e| e.summary == summary)
+        {
+            return;
+        }
+        self.next_activity_seq += 1;
+        self.recent_activity.insert(
+            0,
+            ActivityEntry {
+                seq: self.next_activity_seq,
+                at_ms,
+                summary,
+            },
+        );
+        if self.recent_activity.len() > MAX_ACTIVITY_ENTRIES {
+            self.recent_activity.truncate(MAX_ACTIVITY_ENTRIES);
         }
     }
 
@@ -197,6 +237,8 @@ pub fn apply(map: &mut HashMap<String, Session>, raw: RawEvent) -> Option<String
             entry.acknowledged_done = false;
             entry.started_at_ms = raw.ts;
             entry.last_prompt = String::new();
+            entry.recent_activity.clear();
+            entry.next_activity_seq = 0;
         }
         "UserPromptSubmit" => {
             entry.status = Status::Working;
@@ -204,6 +246,8 @@ pub fn apply(map: &mut HashMap<String, Session>, raw: RawEvent) -> Option<String
             entry.acknowledged_done = false;
             entry.started_at_ms = raw.ts;
             entry.last_prompt = String::new();
+            entry.recent_activity.clear();
+            entry.next_activity_seq = 0;
             if let Some(prompt) = extract_user_prompt(p) {
                 let t = prompt.trim();
                 if !t.is_empty() {
@@ -213,7 +257,9 @@ pub fn apply(map: &mut HashMap<String, Session>, raw: RawEvent) -> Option<String
         }
         "PreToolUse" => {
             entry.status = Status::Working;
-            entry.current_action = describe_pre_tool(p);
+            let action = describe_pre_tool(p);
+            entry.current_action = action.clone();
+            entry.push_activity(action, raw.ts);
         }
         "PostToolUse" => {
             // Track file edits when we can derive them; otherwise leave action
