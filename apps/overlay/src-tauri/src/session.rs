@@ -80,8 +80,13 @@ pub struct Session {
     pub recent_activity: Vec<ActivityEntry>,
     pub model: String,
     pub last_commit_hash: Option<String>,
+    pub done_summary: Option<String>,
     #[serde(skip)]
     pub last_turn_id: String,
+    #[serde(skip)]
+    pub turn_activity_turn_id: String,
+    #[serde(skip)]
+    pub turn_activity_summaries: Vec<String>,
     #[serde(skip)]
     pub next_activity_seq: u64,
     #[serde(skip)]
@@ -108,7 +113,10 @@ impl Session {
             recent_activity: vec![],
             model: String::new(),
             last_commit_hash: None,
+            done_summary: None,
             last_turn_id: String::new(),
+            turn_activity_turn_id: String::new(),
+            turn_activity_summaries: Vec::new(),
             next_activity_seq: 0,
             parent_pid,
             files_edited_map: HashMap::new(),
@@ -156,6 +164,22 @@ impl Session {
             .collect();
         v.sort_by(|a, b| a.0.cmp(&b.0));
         self.files_edited = v;
+    }
+
+    fn flush_turn_activity(&mut self, at_ms: u64) {
+        if self.turn_activity_summaries.is_empty() {
+            return;
+        }
+        if self.turn_activity_summaries.len() == 1 {
+            let summary = self.turn_activity_summaries[0].clone();
+            self.push_activity_with_kind(summary, at_ms, ActivityKind::Normal, "");
+        } else {
+            let n = self.turn_activity_summaries.len();
+            let summary = format!("{n} commands in parallel");
+            self.push_activity_with_kind(summary, at_ms, ActivityKind::Normal, "");
+        }
+        self.turn_activity_summaries.clear();
+        self.turn_activity_turn_id.clear();
     }
 }
 
@@ -280,6 +304,9 @@ pub fn apply(map: &mut HashMap<String, Session>, raw: RawEvent) -> Option<String
             entry.last_prompt = String::new();
             entry.recent_activity.clear();
             entry.next_activity_seq = 0;
+            entry.turn_activity_summaries.clear();
+            entry.turn_activity_turn_id.clear();
+            entry.done_summary = None;
         }
         "UserPromptSubmit" => {
             entry.status = Status::Working;
@@ -289,6 +316,9 @@ pub fn apply(map: &mut HashMap<String, Session>, raw: RawEvent) -> Option<String
             entry.last_prompt = String::new();
             entry.recent_activity.clear();
             entry.next_activity_seq = 0;
+            entry.turn_activity_summaries.clear();
+            entry.turn_activity_turn_id.clear();
+            entry.done_summary = None;
             if let Some(prompt) = extract_user_prompt(p) {
                 let t = prompt.trim();
                 if !t.is_empty() {
@@ -300,11 +330,24 @@ pub fn apply(map: &mut HashMap<String, Session>, raw: RawEvent) -> Option<String
             entry.status = Status::Working;
             let action = describe_pre_tool(p);
             let turn_id = p.get("turn_id").and_then(|v| v.as_str()).unwrap_or("");
-            entry.current_action = action.clone();
-            entry.push_activity_with_kind(action, raw.ts, ActivityKind::Normal, turn_id);
+            if !entry.turn_activity_turn_id.is_empty() && turn_id != entry.turn_activity_turn_id {
+                entry.flush_turn_activity(raw.ts);
+            }
+            if !action.is_empty() && !entry.turn_activity_summaries.contains(&action) {
+                entry.turn_activity_summaries.push(action.clone());
+                if entry.turn_activity_summaries.len() > 8 {
+                    let excess = entry.turn_activity_summaries.len() - 8;
+                    entry.turn_activity_summaries.drain(0..excess);
+                }
+            }
+            if !turn_id.is_empty() {
+                entry.turn_activity_turn_id = turn_id.to_string();
+            }
+            entry.current_action = action;
             entry.last_turn_id = turn_id.to_string();
         }
         "PostToolUse" => {
+            entry.flush_turn_activity(raw.ts);
             track_files_from_post(entry, p);
             let tool = p.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
             let response = p
@@ -312,6 +355,7 @@ pub fn apply(map: &mut HashMap<String, Session>, raw: RawEvent) -> Option<String
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             if tool == "Bash" {
+                parse_gh_pr_post(entry, response, raw.ts);
                 if let Some((passed, failed)) = parse_test_result(response) {
                     let summary = if failed == 0 {
                         format!("{passed} tests passed")
@@ -332,8 +376,19 @@ pub fn apply(map: &mut HashMap<String, Session>, raw: RawEvent) -> Option<String
             entry.current_action = "Thinking…".to_string();
         }
         "Stop" => {
+            entry.flush_turn_activity(raw.ts);
             entry.status = Status::Done;
-            entry.current_action = "Done".to_string();
+            if let Some(msg) = p.get("last_assistant_message").and_then(|v| v.as_str()) {
+                let summary = extract_done_summary(msg);
+                if !summary.is_empty() {
+                    entry.done_summary = Some(summary.clone());
+                    entry.current_action = summary;
+                } else {
+                    entry.current_action = "Done".to_string();
+                }
+            } else {
+                entry.current_action = "Done".to_string();
+            }
             entry.flatten_files();
         }
         _ => {
@@ -574,8 +629,9 @@ fn classify_bash(cmd: &str) -> String {
         "bash" | "sh" | "zsh" | "fish" => classify_script(rest),
         "powershell" | "pwsh" => classify_script(rest),
 
-        // ── Git ─────────────────────────────────────────────────────────────
+        // ── Git / GitHub CLI ─────────────────────────────────────────────────
         "git" => classify_git(first_non_flag(rest)),
+        "gh" => classify_gh(cmd),
 
         // ── File reading ────────────────────────────────────────────────────
         "cat" | "type" | "get-content" | "gc" | "head" | "tail" | "less" | "more" => {
@@ -706,18 +762,118 @@ fn parse_test_result(response: &str) -> Option<(u32, u32)> {
 fn parse_commit_hash(response: &str) -> Option<String> {
     for line in response.lines() {
         let line = line.trim();
-        if !line.starts_with('[') || !line.ends_with(']') {
+        if line.starts_with('[') && line.ends_with(']') {
+            let inner = &line[1..line.len() - 1];
+            let mut parts = inner.split_whitespace();
+            let _branch = parts.next()?;
+            let hash = parts.next()?;
+            if (6..=12).contains(&hash.len()) && hash.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Some(hash.chars().take(8).collect());
+            }
             continue;
         }
-        let inner = &line[1..line.len() - 1];
-        let mut parts = inner.split_whitespace();
-        let _branch = parts.next()?;
-        let hash = parts.next()?;
-        if (6..=12).contains(&hash.len()) && hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        let hash: String = line
+            .chars()
+            .take_while(|c| c.is_ascii_hexdigit())
+            .collect();
+        if (7..=12).contains(&hash.len()) {
             return Some(hash.chars().take(8).collect());
         }
     }
     None
+}
+
+fn parse_gh_pr_post(entry: &mut Session, response: &str, at_ms: u64) {
+    let trimmed = response.trim();
+    if !trimmed.contains("\"number\":") || !trimmed.contains("\"headRefOid\":") {
+        return;
+    }
+
+    let number = extract_json_u32(trimmed, "\"number\":");
+    let oid = extract_json_string(trimmed, "\"headRefOid\":");
+    let Some(number) = number else { return };
+
+    if let Some(ref oid_full) = oid {
+        let short: String = oid_full
+            .chars()
+            .filter(|c| c.is_ascii_hexdigit())
+            .take(8)
+            .collect();
+        if short.len() >= 7 && entry.last_commit_hash.is_none() {
+            entry.last_commit_hash = Some(short);
+        }
+    }
+
+    let mut summary = format!("PR #{number}");
+    if let Some(label) = extract_first_label_name(trimmed) {
+        summary.push_str(" · ");
+        summary.push_str(&label);
+    }
+    entry.push_activity_with_kind(summary, at_ms, ActivityKind::Normal, "");
+}
+
+fn extract_json_u32(s: &str, key: &str) -> Option<u32> {
+    let idx = s.find(key)?;
+    let rest = s[idx + key.len()..].trim_start();
+    let num: String = rest
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    num.parse().ok()
+}
+
+fn extract_json_string(s: &str, key: &str) -> Option<String> {
+    let idx = s.find(key)?;
+    let rest = s[idx + key.len()..].trim_start();
+    let rest = rest.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
+fn extract_first_label_name(s: &str) -> Option<String> {
+    let labels_idx = s.find("\"labels\"")?;
+    let slice = &s[labels_idx..];
+    let name_key = "\"name\":\"";
+    let idx = slice.find(name_key)?;
+    let rest = &slice[idx + name_key.len()..];
+    let end = rest.find('"')?;
+    let name = &rest[..end];
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+fn extract_done_summary(msg: &str) -> String {
+    let first = msg
+        .trim()
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    if first.is_empty() {
+        return String::new();
+    }
+    truncate_at_word_boundary(first, 100)
+}
+
+fn truncate_at_word_boundary(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let truncated: String = s.chars().take(max_chars).collect();
+    if let Some(pos) = truncated.rfind(char::is_whitespace) {
+        if pos > max_chars / 2 {
+            let mut out: String = truncated.chars().take(pos).collect();
+            out.push('…');
+            return out.trim().to_string();
+        }
+    }
+    let mut out: String = s.chars().take(max_chars.saturating_sub(1)).collect();
+    out.push('…');
+    out
 }
 
 fn rest_after_first_token(s: &str) -> &str {
@@ -896,6 +1052,7 @@ fn classify_git(sub: &str) -> String {
         "status" | "diff" | "log" | "show" | "blame" | "shortlog" => {
             "Checking git state".to_string()
         }
+        "branch" => classify_git_branch(sub),
         "add" | "commit" => "Committing changes".to_string(),
         "push" => "Pushing to remote".to_string(),
         "pull" | "fetch" => "Fetching from remote".to_string(),
@@ -908,6 +1065,98 @@ fn classify_git(sub: &str) -> String {
         "remote" => "Managing remotes".to_string(),
         _ => "Git operation".to_string(),
     }
+}
+
+fn classify_git_branch(rest: &str) -> String {
+    let tokens: Vec<&str> = rest.split_whitespace().collect();
+    let has_delete = tokens.iter().any(|t| *t == "-d" || *t == "-D");
+    if has_delete {
+        if let Some(name) = git_branch_name_after_delete_flag(rest) {
+            return format!("Deleting branch {}", truncate(&name, 40));
+        }
+        return "Deleting branch".to_string();
+    }
+    let has_force = tokens.iter().any(|t| *t == "-f" || *t == "-M" || *t == "-m");
+    if has_force {
+        return "Updating branch".to_string();
+    }
+    "Listing branches".to_string()
+}
+
+fn git_branch_name_after_delete_flag(rest: &str) -> Option<String> {
+    let tokens: Vec<&str> = rest.split_whitespace().collect();
+    for (i, t) in tokens.iter().enumerate() {
+        if *t == "-d" || *t == "-D" {
+            for next in tokens.iter().skip(i + 1) {
+                if !next.starts_with('-') && !next.is_empty() {
+                    return Some(next.to_string());
+                }
+            }
+        }
+    }
+    tokens
+        .iter()
+        .rev()
+        .find(|t| !t.starts_with('-') && **t != "branch")
+        .map(|s| s.to_string())
+}
+
+fn parse_gh_pr_number(cmd: &str) -> Option<u32> {
+    let lower = cmd.to_ascii_lowercase();
+    if let Some(idx) = lower.find("pulls/") {
+        let rest = &lower[idx + 6..];
+        let num: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        return num.parse().ok();
+    }
+    let tokens: Vec<&str> = cmd.split_whitespace().collect();
+    for (i, t) in tokens.iter().enumerate() {
+        if t.eq_ignore_ascii_case("pr") && i + 1 < tokens.len() {
+            let sub = tokens[i + 1];
+            if matches!(
+                sub.to_ascii_lowercase().as_str(),
+                "view" | "edit" | "comment"
+            ) && i + 2 < tokens.len()
+            {
+                let n = tokens[i + 2].trim_matches(|c: char| !c.is_ascii_digit());
+                if let Ok(num) = n.parse::<u32>() {
+                    return Some(num);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn classify_gh(cmd: &str) -> String {
+    let lower = cmd.to_ascii_lowercase();
+    if lower.contains("pr create") {
+        return "Creating PR".to_string();
+    }
+    if lower.contains("pr view") {
+        if let Some(n) = parse_gh_pr_number(cmd) {
+            return format!("Viewing PR #{n}");
+        }
+        return "Viewing PR".to_string();
+    }
+    if lower.contains("pr edit") {
+        if let Some(n) = parse_gh_pr_number(cmd) {
+            return format!("Updating PR #{n}");
+        }
+        return "Updating PR".to_string();
+    }
+    if lower.contains("api") {
+        if lower.contains("requested_reviewers") {
+            return "Requesting PR review".to_string();
+        }
+        if let Some(n) = parse_gh_pr_number(cmd) {
+            return format!("GitHub API · PR #{n}");
+        }
+        return "GitHub API".to_string();
+    }
+    "GitHub CLI".to_string()
 }
 
 fn classify_pip(rest: &str) -> String {
