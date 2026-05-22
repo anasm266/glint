@@ -19,6 +19,7 @@ fn main() {
     // Read stdin first — we always need it, and it contains hook_event_name.
     let mut raw_stdin = String::new();
     let _ = std::io::stdin().read_to_string(&mut raw_stdin);
+    let stdin = strip_hook_stdin(&raw_stdin);
 
     // Event name: prefer argv[1] (legacy), fall back to hook_event_name in the
     // JSON payload. Using the JSON field means the command in config.toml can be
@@ -27,7 +28,7 @@ fn main() {
         .nth(1)
         .filter(|s| !s.is_empty())
         .or_else(|| {
-            serde_json::from_str::<serde_json::Value>(&raw_stdin)
+            parse_hook_json(stdin)
                 .ok()
                 .and_then(|v| v.get("hook_event_name").and_then(|n| n.as_str()).map(str::to_string))
         })
@@ -35,7 +36,7 @@ fn main() {
 
     let envelope = serde_json::json!({
         "event": event,
-        "payload": parse_or_string(&raw_stdin),
+        "payload": parse_or_string(stdin),
         "ts": now_ms(),
         "hook_pid": std::process::id(),
         "parent_pid": parent_pid().unwrap_or(0),
@@ -57,13 +58,38 @@ fn post_envelope(body: &serde_json::Value) -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
+/// Cursor on Windows may prefix hook stdin with a UTF-8 BOM; serde_json rejects it.
+fn strip_hook_stdin(s: &str) -> &str {
+    s.trim().trim_start_matches('\u{FEFF}')
+}
+
+fn parse_hook_json(s: &str) -> Result<serde_json::Value, serde_json::Error> {
+    serde_json::from_str(strip_hook_stdin(s))
+}
+
 fn parse_or_string(s: &str) -> serde_json::Value {
-    if s.trim().is_empty() {
+    let s = strip_hook_stdin(s);
+    if s.is_empty() {
         return serde_json::Value::Null;
     }
-    match serde_json::from_str::<serde_json::Value>(s) {
+    match parse_hook_json(s) {
         Ok(v) => v,
         Err(_) => serde_json::Value::String(s.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strips_utf8_bom_before_parse() {
+        let raw = "\u{FEFF}{\"hook_event_name\":\"preToolUse\",\"conversation_id\":\"x\"}";
+        let v = parse_hook_json(raw).expect("parse");
+        assert_eq!(
+            v.get("hook_event_name").and_then(|x| x.as_str()),
+            Some("preToolUse")
+        );
     }
 }
 

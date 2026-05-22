@@ -402,10 +402,34 @@ fn apply_after_file_edit(entry: &mut Session, p: &serde_json::Value, ts: u64) {
     entry.push_activity_with_kind(label, ts, ActivityKind::Normal, "");
 }
 
+/// If overlay-hook could not parse stdin (e.g. BOM slipped through), payload may
+/// be a JSON string; coerce so session_id and fields are readable.
+fn coerce_payload(value: &serde_json::Value) -> serde_json::Value {
+    let Some(s) = value.as_str() else {
+        return value.clone();
+    };
+    let s = s.trim().trim_start_matches('\u{FEFF}');
+    parse_hook_json(s).unwrap_or_else(|_| value.clone())
+}
+
+fn parse_hook_json(s: &str) -> Result<serde_json::Value, serde_json::Error> {
+    serde_json::from_str(s.trim().trim_start_matches('\u{FEFF}'))
+}
+
+fn resolve_event_name(raw_event: &str, p: &serde_json::Value) -> String {
+    if raw_event.eq_ignore_ascii_case("unknown") {
+        if let Some(name) = p.get("hook_event_name").and_then(|v| v.as_str()) {
+            return normalize_hook_event(name);
+        }
+    }
+    normalize_hook_event(raw_event)
+}
+
 /// Apply a raw event to the session map. Returns the session id that was
 /// affected (if any) so callers can do follow-up work.
 pub fn apply(map: &mut HashMap<String, Session>, raw: RawEvent) -> Option<String> {
-    let p = &raw.payload;
+    let payload = coerce_payload(&raw.payload);
+    let p = &payload;
     let session_id = resolve_session_id(p);
     if session_id.is_empty() {
         return None;
@@ -413,7 +437,7 @@ pub fn apply(map: &mut HashMap<String, Session>, raw: RawEvent) -> Option<String
 
     let cwd = resolve_cwd(p);
     let app = detect_app(p);
-    let event = normalize_hook_event(&raw.event);
+    let event = resolve_event_name(&raw.event, p);
 
     let entry = map.entry(session_id.clone()).or_insert_with(|| {
         Session::new(
@@ -1859,6 +1883,23 @@ mod tests {
         let codex = serde_json::json!({ "session_id": "s1" });
         assert_eq!(detect_app(&cursor), App::Cursor);
         assert_eq!(detect_app(&codex), App::Codex);
+    }
+
+    #[test]
+    fn apply_cursor_bom_string_payload_and_unknown_event() {
+        let inner = r#"{"conversation_id":"c-bom","hook_event_name":"beforeSubmitPrompt","prompt":"hi","workspace_roots":["/C:/proj"]}"#;
+        let mut map = HashMap::new();
+        let raw = RawEvent {
+            event: "unknown".to_string(),
+            payload: serde_json::Value::String(format!("\u{FEFF}{inner}")),
+            ts: 1,
+            hook_pid: None,
+            parent_pid: None,
+        };
+        apply(&mut map, raw);
+        let s = map.get("c-bom").expect("session created");
+        assert_eq!(s.app, App::Cursor);
+        assert_eq!(s.last_prompt, "hi");
     }
 
     #[test]
