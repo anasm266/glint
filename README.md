@@ -4,7 +4,7 @@ A translucent always-on-top Windows overlay that shows live state of your AI cod
 
 ## Status
 
-v0.1 — Milestone A. Codex Desktop only. **Compact pill** plus an **expanded hover detail** when you point at the pill or fleet dots. Dogfood build.
+v0.1 — Milestone A. **Codex Desktop** and **Cursor** (user-level hooks). **Compact pill** plus **expanded hover detail** on pill or fleet bar. Dogfood build.
 
 Near-term polish is tracked in [ROADMAP.md](ROADMAP.md). Hover panel layout and activity feed behavior are summarized in [HOVER_PANEL.md](HOVER_PANEL.md).
 
@@ -13,7 +13,7 @@ Near-term polish is tracked in [ROADMAP.md](ROADMAP.md). Hover panel layout and 
 ### Compact pill (380×60 collapsed, corner from Settings)
 
 - **Fleet bar** — One dot per agent session (Codex or Cursor; up to eight visible, then `+N` overflow). Dots reflect status: idle, working, done, errored (working dots use a subtle pulse).
-- **Primary line** — App label (`Codex`), project folder name, and the current action (`Editing …`, `Running: …`, or a **Done** summary with diff totals when the run has finished).
+- **Primary line** — App label (`Codex` / `Cursor`), project folder name, and the current action (`Editing …`, `Running: …`, or a **Done** summary with diff totals when the run has finished).
 - **Done queue** — If more than one session is **Done** and not yet acknowledged, the primary line is prefixed with `✓ N done ·` before the usual Done summary for the frontmost completion.
 - **Status badge** — Elapsed time while working; **just now** / **ago** after Done.
 - **Hooks disconnected hint** — If neither Codex nor Cursor hooks are installed, the pill shows **Connect in Settings to get started** (click opens Settings). When sessions exist but hooks are still off, a small **hollow amber dot** appears after the fleet; click it to open Settings.
@@ -65,7 +65,7 @@ overlay-hook.exe  -- POST http://127.0.0.1:47611/event (200ms fire-and-forget) -
    agent continues
 ```
 
-Hook events are normalized in `apps/overlay/src-tauri/src/session.rs` (`Session::apply`): status, `currentAction`, file diffs, `recentActivity`, `doneSummary`, `lastPrompt`, model, and commit hash hints. The UI polls/streams snapshots via Tauri commands.
+Hook events are normalized in `apps/overlay/src-tauri/src/session.rs` (`Session::apply`): status, `currentAction`, file diffs, `recentActivity`, `doneSummary`, `lastPrompt`, model, and commit hash hints. Cursor-specific handling includes UTF-8 BOM strip in `overlay-hook.exe`, `Shell` / `Set-Location` command labeling, `tool_output` JSON unwrap, `conversation_id` / `generation_id`, and `afterFileEdit` for diffs. Activity lines use per-turn buffering, parallel flush (`Parallel: A · B · C`), and bash/output classifiers (see [HOVER_PANEL.md](HOVER_PANEL.md)). The UI polls session snapshots via Tauri commands.
 
 If `overlay-app.exe` is closed or crashed, the hook POST times out in 200ms and the Codex session is never blocked.
 
@@ -130,7 +130,7 @@ The `overlay_managed = true` marker is what disconnect uses to find and remove o
 
 ## Cursor hook config written by "Connect Cursor"
 
-User-level `~/.cursor/hooks.json` — six events: `sessionStart`, `stop`, `preToolUse`, `postToolUse`, `beforeSubmitPrompt`, `afterFileEdit`. Each entry is `{ "command": "<abs path>/overlay-hook.exe", "overlay_managed": true }`. The hook reads `hook_event_name` from stdin JSON (camelCase); `session.rs` normalizes to the same internal event names as Codex.
+User-level `~/.cursor/hooks.json` — six events: `sessionStart`, `stop`, `preToolUse`, `postToolUse`, `beforeSubmitPrompt`, `afterFileEdit`. Each entry is `{ "command": "<abs path>/overlay-hook.exe", "overlay_managed": true }`. The hook strips a leading UTF-8 BOM on Windows stdin, reads `hook_event_name` from JSON (camelCase), and `session.rs` normalizes to the same internal event names as Codex.
 
 ### Payload differences (Cursor vs Codex)
 
@@ -148,12 +148,12 @@ User-level `~/.cursor/hooks.json` — six events: `sessionStart`, `stop`, `preTo
 
 1. `cargo tauri dev` launches a translucent always-on-top window in the chosen corner of the primary monitor with the Win11 acrylic surface.
 2. Tray icon shows up; `Quit` exits cleanly; `Settings…` opens settings window.
-3. Toggling `Connect Codex` writes the five hook entries into `~/.codex/config.toml`, preserves user content, and disconnect removes them cleanly.
-4. With Codex Desktop running and a fresh prompt, a session row appears within about a second of the first hook firing.
-5. As Codex works, the primary line updates (`Editing X`, `Running: Y`) and elapsed time ticks; the hover card shows activity lines when tools run.
-6. On `Stop`, the row shows Done styling with diff scope when available; the hover card lists touched files or an assistant summary.
-7. **Open Codex** / **Dismiss** in the hover card focus Codex or acknowledge Done; acknowledged sessions drop off the fleet after the delay.
-8. Killing `overlay-app.exe` mid-session does not interfere with Codex (hook calls time out in 200ms, agent continues).
+3. Toggling **Connect Codex** / **Connect Cursor** writes managed hook entries (with backup); disconnect removes only `overlay_managed` entries.
+4. With Codex or Cursor running and a fresh prompt, a session dot appears within about a second of the first hook firing.
+5. As the agent works, the primary line updates (`Editing X`, `Running: Y`) and elapsed time ticks; the hover card shows activity lines when tools run.
+6. On `Stop`, the row shows Done styling with diff scope when available; the hover card lists touched files or an assistant summary (Codex) or status-based Done copy (Cursor).
+7. **Open Codex** / **Open Cursor** / **Dismiss** in the hover card focus the agent or acknowledge Done; acknowledged sessions drop off the fleet after the delay.
+8. Killing `overlay-app.exe` mid-session does not block the agent (hook POST times out in 200ms).
 9. Single-instance lock prevents a second copy from launching.
 
 ## Out of scope for v0.1 (still)
