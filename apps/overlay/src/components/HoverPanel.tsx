@@ -192,13 +192,15 @@ function ActivityFeed({ entries }: { entries: ActivityEntryDTO[] }) {
               transition={{ duration: 0.18, ease: easeOut }}
               className={clsx(
                 "overflow-hidden text-[11px] leading-snug",
-                entry.kind === "success"
-                  ? "text-emerald-400/70"
-                  : entry.kind === "failure"
-                    ? "text-rose-400/70"
-                    : i === 0
-                      ? "text-white/70"
-                      : "text-white/38"
+                entry.summary.includes("commands in parallel")
+                  ? "italic text-white/50"
+                  : entry.kind === "success"
+                    ? "text-emerald-400/70"
+                    : entry.kind === "failure"
+                      ? "text-rose-400/70"
+                      : i === 0
+                        ? "text-white/70"
+                        : "text-white/38"
               )}
               title={entry.summary}
             >
@@ -216,8 +218,27 @@ function ActivityFeed({ entries }: { entries: ActivityEntryDTO[] }) {
 
 function DoneResult({ session }: { session: SessionDTO }) {
   const files = session.filesEdited;
+  const doneSummary = session.doneSummary?.trim();
+
+  if (doneSummary) {
+    return (
+      <p
+        className="line-clamp-2 text-[14px] font-medium leading-snug text-white/90"
+        title={doneSummary}
+      >
+        {doneSummary}
+      </p>
+    );
+  }
 
   if (files.length === 0) {
+    if (session.lastCommitHash) {
+      return (
+        <p className="text-[14px] font-medium leading-snug text-white/90">
+          Pushed {session.lastCommitHash}
+        </p>
+      );
+    }
     return (
       <p className="text-[14px] font-medium leading-snug text-white/90">
         No files changed

@@ -32,6 +32,7 @@ export interface SessionDTO {
   recentActivity: ActivityEntryDTO[];
   model: string;
   lastCommitHash: string | null;
+  doneSummary: string | null;
 }
 
 export type Corner = "tl" | "tr" | "bl" | "br";
