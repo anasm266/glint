@@ -2,9 +2,10 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 
-use crate::session::Session;
+use crate::session::{self, Session};
 
 pub const SPAWN_LINK_WINDOW_MS: u64 = 120_000;
 /// Drop child conversations with no rollup events for this long.
@@ -59,13 +60,27 @@ impl SessionRouting {
         }
     }
 
-    pub fn prune_stale_children(&self, entry: &mut crate::session::Session, ts: u64) {
-        entry.active_child_conversations.retain(|child| {
-            self.child_last_event_ms
-                .get(child)
-                .map(|last| ts.saturating_sub(*last) <= CHILD_QUIESCE_MS)
-                .unwrap_or(false)
-        });
+    /// Remove child conversations with no rollup activity for [`CHILD_QUIESCE_MS`].
+    /// Returns true if any child was unlinked from the parent session.
+    pub fn prune_stale_children(&mut self, entry: &mut Session, ts: u64) -> bool {
+        let before = entry.active_child_conversations.len();
+        let stale: Vec<String> = entry
+            .active_child_conversations
+            .iter()
+            .filter(|child| {
+                self.child_last_event_ms
+                    .get(*child)
+                    .map(|last| ts.saturating_sub(*last) > CHILD_QUIESCE_MS)
+                    .unwrap_or(true)
+            })
+            .cloned()
+            .collect();
+        for child in stale {
+            entry.active_child_conversations.remove(&child);
+            self.child_to_parent.remove(&child);
+            self.child_last_event_ms.remove(&child);
+        }
+        entry.active_child_conversations.len() != before
     }
 
     /// Pick the parent with the most recent active Task spawn window.
@@ -204,6 +219,23 @@ impl AppState {
     pub fn emit_snapshot(&self, app: &AppHandle) {
         let snap = self.snapshot();
         let _ = app.emit("sessions:update", &snap);
+    }
+
+    /// Wall-clock ms for quiescence when hooks go idle after `pending_stop`.
+    pub fn wall_clock_ms() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    }
+
+    /// Prune quiet children and apply deferred parent stops (no new hook required).
+    pub fn sweep_pending_stops(&self) -> bool {
+        let now = Self::wall_clock_ms();
+        let changed = self.with_session_state(|map, routing| {
+            session::reconcile_pending_stops(map, routing, now)
+        });
+        changed
     }
 
     pub fn remove_session(&self, id: &str) {

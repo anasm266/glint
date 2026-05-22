@@ -492,11 +492,34 @@ fn try_complete_pending_stop(
     }
     routing.prune_stale_children(entry, ts);
     if entry.active_subagent_count > 0 || !entry.active_child_conversations.is_empty() {
+        refresh_action_label(entry);
         return false;
     }
     let pending = entry.pending_stop.take().expect("checked");
     apply_pending_stop(entry, &pending);
     true
+}
+
+/// Prune idle child conversations and apply deferred parent `stop` using wall-clock `now`.
+pub fn reconcile_pending_stops(
+    map: &mut HashMap<String, Session>,
+    routing: &mut SessionRouting,
+    now: u64,
+) -> bool {
+    let mut changed = false;
+    for entry in map.values_mut() {
+        if entry.pending_stop.is_none() {
+            continue;
+        }
+        let pruned = routing.prune_stale_children(entry, now);
+        if try_complete_pending_stop(routing, entry, now) {
+            changed = true;
+        } else if pruned {
+            refresh_action_label(entry);
+            changed = true;
+        }
+    }
+    changed
 }
 
 fn resolve_cwd(p: &serde_json::Value) -> String {
@@ -799,6 +822,7 @@ pub fn apply(
             entry.flush_turn_activity(raw.ts, flush_tid.as_str());
             entry.active_subagent_count = entry.active_subagent_count.saturating_sub(1);
             unlink_child(routing, entry, &raw_conv, &session_id);
+            routing.prune_stale_children(entry, raw.ts);
             entry.status = Status::Working;
             let (summary, kind) = describe_subagent_stop(p);
             if !summary.is_empty() {
@@ -863,6 +887,7 @@ pub fn apply(
 
     if !raw_conv.is_empty() && raw_conv != session_id {
         track_child_activity(routing, entry, &raw_conv, &session_id, raw.ts);
+        routing.prune_stale_children(entry, raw.ts);
     }
 
     let _ = try_complete_pending_stop(routing, entry, raw.ts);
@@ -2848,5 +2873,123 @@ mod tests {
         let parent = map.get("parent-1").unwrap();
         assert_eq!(parent.status, Status::Working);
         assert!(parent.current_action.contains("session.rs") || parent.current_action.contains("Read"));
+    }
+
+    #[test]
+    fn pending_stop_applied_after_child_quiescence() {
+        let mut map = HashMap::new();
+        let mut routing = SessionRouting::default();
+        routing.link_child("child-1", "parent-1");
+        apply(
+            &mut map,
+            &mut routing,
+            RawEvent {
+                event: "sessionStart".to_string(),
+                payload: serde_json::json!({
+                    "conversation_id": "parent-1",
+                    "workspace_roots": ["/proj"]
+                }),
+                ts: 1,
+                hook_pid: None,
+                parent_pid: None,
+            },
+        );
+        routing.touch_child("child-1", 1_000);
+        map.get_mut("parent-1")
+            .unwrap()
+            .active_child_conversations
+            .insert("child-1".to_string());
+        apply(
+            &mut map,
+            &mut routing,
+            RawEvent {
+                event: "stop".to_string(),
+                payload: serde_json::json!({
+                    "conversation_id": "parent-1",
+                    "status": "completed"
+                }),
+                ts: 1_000,
+                hook_pid: None,
+                parent_pid: None,
+            },
+        );
+        assert_eq!(map.get("parent-1").unwrap().status, Status::Working);
+        assert!(reconcile_pending_stops(&mut map, &mut routing, 1_000 + 20_001));
+        let parent = map.get("parent-1").unwrap();
+        assert_eq!(parent.status, Status::Done);
+        assert_eq!(parent.current_action, "Done");
+        assert!(parent.active_child_conversations.is_empty());
+    }
+
+    #[test]
+    fn explore_child_only_tool_events_allows_parent_done() {
+        let mut map = HashMap::new();
+        let mut routing = SessionRouting::default();
+        routing.note_task_spawn("parent-1", 1_000);
+        apply(
+            &mut map,
+            &mut routing,
+            RawEvent {
+                event: "sessionStart".to_string(),
+                payload: serde_json::json!({
+                    "conversation_id": "parent-1",
+                    "workspace_roots": ["/proj"]
+                }),
+                ts: 1_000,
+                hook_pid: None,
+                parent_pid: None,
+            },
+        );
+        apply(
+            &mut map,
+            &mut routing,
+            RawEvent {
+                event: "preToolUse".to_string(),
+                payload: serde_json::json!({
+                    "conversation_id": "explore-1",
+                    "tool_name": "Grep",
+                    "tool_input": { "pattern": "auth" }
+                }),
+                ts: 6_000,
+                hook_pid: None,
+                parent_pid: None,
+            },
+        );
+        apply(
+            &mut map,
+            &mut routing,
+            RawEvent {
+                event: "postToolUse".to_string(),
+                payload: serde_json::json!({
+                    "conversation_id": "explore-1",
+                    "tool_name": "Grep"
+                }),
+                ts: 7_000,
+                hook_pid: None,
+                parent_pid: None,
+            },
+        );
+        apply(
+            &mut map,
+            &mut routing,
+            RawEvent {
+                event: "stop".to_string(),
+                payload: serde_json::json!({
+                    "conversation_id": "parent-1",
+                    "status": "completed"
+                }),
+                ts: 8_000,
+                hook_pid: None,
+                parent_pid: None,
+            },
+        );
+        assert_eq!(map.get("parent-1").unwrap().status, Status::Working);
+        let parent = map.get("parent-1").unwrap();
+        assert!(parent.active_child_conversations.contains("explore-1"));
+        assert!(reconcile_pending_stops(&mut map, &mut routing, 28_000));
+        let parent = map.get("parent-1").unwrap();
+        assert_eq!(parent.status, Status::Done);
+        assert_eq!(parent.current_action, "Done");
+        assert!(!parent.active_child_conversations.contains("explore-1"));
     }
 }
