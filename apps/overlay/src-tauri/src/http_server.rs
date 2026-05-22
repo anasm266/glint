@@ -11,6 +11,7 @@ use serde_json::json;
 use std::net::SocketAddr;
 use tauri::AppHandle;
 
+use crate::file_log;
 use crate::session;
 use crate::state::SharedState;
 
@@ -69,9 +70,14 @@ async fn event(
 ) -> impl IntoResponse {
     tracing::debug!("event: {} payload={}", raw.event, raw.payload);
 
-    let touched = ctx
-        .state
-        .with_session_state(|map, routing| session::apply(map, routing, raw));
+    let raw_for_log = raw.clone();
+    let touched = ctx.state.with_session_state(|map, routing| {
+        let touched = session::apply(map, routing, raw);
+        if file_log::enabled() {
+            file_log::log_hook_event(&raw_for_log, routing, &touched, map);
+        }
+        touched
+    });
     if touched.is_some() {
         ctx.state.emit_snapshot(&ctx.app);
     }

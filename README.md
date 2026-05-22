@@ -88,14 +88,67 @@ npm run app:dev
 
 Open **Settings…** from the tray and toggle **Connect Codex** and/or **Connect Cursor**. Codex entries go into `~/.codex/config.toml` (backup `config.toml.overlay-backup`). Cursor entries go into `~/.cursor/hooks.json` (backup `hooks.json.overlay-backup`). Restart each app after toggling. Disconnecting removes only entries we added (`overlay_managed`).
 
-## Build (release)
+## Run standalone (no dev server)
+
+You do **not** need `npm run app:dev` for day-to-day use. Build once, then double-click the release binary (or pin it to the taskbar).
+
+**Prerequisites:** same as [Prerequisites](#prerequisites) (Rust MSVC target, Node for the one-time frontend build, WebView2 on Windows).
 
 ```powershell
 cd apps\overlay
+npm install
 npm run app:build
 ```
 
-The unpacked `overlay-app.exe` and an `.msi` end up under `apps/overlay\src-tauri\target\release\bundle\`. The release `overlay-hook.exe` is at `target\release\overlay-hook.exe` (workspace root). For "live with it for a day" testing, run the unpacked overlay-app.exe directly; the hook installer will resolve the hook binary path correctly via `current_exe()`.
+**Where the `.exe` lands**
+
+| Artifact | Path (from repo root `overlay-app/`) |
+|----------|--------------------------------------|
+| Overlay app (run this) | `apps\overlay\src-tauri\target\release\overlay-app.exe` |
+| Hook relay (installed by Settings) | `target\release\overlay-hook.exe` |
+| Installer bundles (optional) | `apps\overlay\src-tauri\target\release\bundle\` (`.msi` / NSIS) |
+
+**First run**
+
+1. Double-click `overlay-app.exe` (or run it from PowerShell). A tray icon appears; the pill shows in the chosen corner.
+2. Tray → **Settings…** → **Connect Codex** / **Connect Cursor** (writes managed hooks; restart each agent app).
+3. Start a Cursor or Codex session — hooks POST to `http://127.0.0.1:47611/event` with the same 200 ms timeout as in dev.
+
+The release build embeds the Vite UI; no `localhost:5173` process is required. Rebuild with `npm run app:build` after code changes.
+
+## Debug logs (`GLINT_LOG`)
+
+Optional JSONL logs for comparing runs (raw hook input + overlay state after each event).
+
+**Enable** — set before starting the overlay (User or System environment variable, or one-shot in PowerShell):
+
+```powershell
+$env:GLINT_LOG = "1"
+& "C:\path\to\overlay-app\apps\overlay\src-tauri\target\release\overlay-app.exe"
+```
+
+Any non-empty value works except `0` / `false`. When enabled, startup logs the exact file path in the console (`tracing` info line).
+
+**Log directory**
+
+- Windows: `%LOCALAPPDATA%\Glint\logs\` (e.g. `C:\Users\<you>\AppData\Local\Glint\logs\`)
+- macOS/Linux fallback: `~/.glint/logs/`
+
+**Per-run file:** `glint-<run_id>.jsonl` where `run_id` is the process start time in ms (one file per overlay launch).
+
+**Line types (JSONL)**
+
+| `type` | When | Contents |
+|--------|------|----------|
+| `run_start` | App launch | version, exe path, log file path |
+| `hook_event` | Each `POST /event` | `event`, `conversation_id`, `session_id`, `rollup_parent`, `status`, `current_action`, full `payload` |
+| `snapshot` | After state changes | `sessions[]` with id, app, project, status, `currentAction`, `acknowledgedDone` (what the UI received) |
+
+Logging uses a background thread with append-only writes so hook handling stays within the 200 ms budget.
+
+## Build (release)
+
+Same as [Run standalone](#run-standalone-no-dev-server): `npm run app:build` from `apps\overlay`.
 
 ## Folder layout
 

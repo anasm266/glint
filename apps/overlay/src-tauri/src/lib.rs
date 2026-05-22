@@ -5,6 +5,7 @@
 
 mod commands;
 mod cursor_hook_install;
+mod file_log;
 mod hook_install;
 mod http_server;
 mod session;
@@ -27,6 +28,8 @@ pub fn run() {
         .with_target(false)
         .with_level(true)
         .init();
+
+    file_log::init();
 
     let state = Arc::new(AppState::new());
 

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 
+use crate::file_log;
 use crate::session::{self, Session};
 
 pub const SPAWN_LINK_WINDOW_MS: u64 = 120_000;
@@ -218,6 +219,7 @@ impl AppState {
 
     pub fn emit_snapshot(&self, app: &AppHandle) {
         let snap = self.snapshot();
+        file_log::log_snapshot(&snap);
         let _ = app.emit("sessions:update", &snap);
     }
 
