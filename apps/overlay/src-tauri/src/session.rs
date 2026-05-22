@@ -362,6 +362,10 @@ fn normalize_hook_event(name: &str) -> String {
     }
 }
 
+pub(crate) fn raw_conversation_id_pub(p: &serde_json::Value) -> String {
+    raw_conversation_id(p)
+}
+
 fn raw_conversation_id(p: &serde_json::Value) -> String {
     p.get("conversation_id")
         .or_else(|| p.get("session_id"))
@@ -638,6 +642,10 @@ fn apply_after_file_edit(entry: &mut Session, p: &serde_json::Value, ts: u64) {
 
 /// If overlay-hook could not parse stdin (e.g. BOM slipped through), payload may
 /// be a JSON string; coerce so session_id and fields are readable.
+pub(crate) fn coerce_payload_pub(value: &serde_json::Value) -> serde_json::Value {
+    coerce_payload(value)
+}
+
 fn coerce_payload(value: &serde_json::Value) -> serde_json::Value {
     let Some(s) = value.as_str() else {
         return value.clone();
