@@ -1,54 +1,40 @@
 # Roadmap
 
-Near-term polish for the Codex-only build, before Cursor support. Items are ordered roughly by impact; **last preference** means nice-to-have once the rest feels solid.
+Near-term polish for the v0.1 dogfood build (Codex + Cursor hooks shipped). Items are ordered roughly by impact; **last preference** means nice-to-have once the rest feels solid.
 
 ---
 
 ## 1. Compact strip: fleet bar + primary line
 
-**Shipped in v0.1 dogfood:** fleet dots (8 + overflow), temp select on dot click, auto primary priority (error → unacked Done → recent), done queue prefix on primary line, hover card with activity feed + Done file list + assistant summary, ack via **Dismiss** and ~7s removal.
+**Shipped in v0.1 dogfood:**
 
-**Still open** (see subsections below):
-
-### Fleet bar (left)
-
-- One **small dot per active session**, colored by state so you can read "3 working, 1 done, 1 errored" at a glance.
-- Size the strip so **about 5–8** sessions fit comfortably in the dot row.
-- If there are more sessions than fit, collapse the overflow to **`+N`** count of hidden sessions.
-
-### Fleet bar dots — interactive
-
-- **Single click** a dot → temporary primary selection (ring); clears on overlay blur. Does **not** focus Codex (use hover **Open Codex**).
-- **Hover** pill or bar → expanded panel for the current primary session.
-
-### Primary line (right)
-
-When **nothing is pinned**, the primary line auto-selects whichever session is most interesting right now using this priority (first match wins):
-
-1. Any session in an **attention** state (error / stall / loop / dangerous command when those exist).
-2. Any session that is **Done but not yet acknowledged**.
-3. **Most recently active** session (by last hook / activity).
-
-When a dot is **pinned** (double-clicked), the primary line is locked to that session regardless of priority until unpinned or the session ends.
-
-### Done queue
-
-- If **multiple** sessions finish before any are acknowledged, the primary line shows the most recent completion and a count, e.g. **`✓ 3 done`**.
-- **Single-clicking** a done dot focuses that session's Codex window and marks it acknowledged, surfacing the next unacked done session in the primary line (queue advances).
-
-### Ack-to-dismiss
-
-- **Dismiss** in the hover card (or equivalent command) sets `acknowledgedDone`; Done tint stays until ack.
-- Optional later: also ack when user focuses Codex from outside the overlay.
-
-### Fleet bar: expire finished sessions after ack
-
-**Shipped:** ~7s timer after ack, then `remove_session`; dot exit animation via Framer Motion.
+- Fleet dots (8 + `+N` overflow), **status-colored** (idle / working / done / errored; working pulse)
+- Primary line shows **app label** (`Codex` / `Cursor`) + project + action
+- Auto primary priority: errored → unacknowledged Done → most recently active
+- **Temporary** primary on single dot click (ring); clears on overlay blur; pill click clears temp
+- Done queue prefix `✓ N done ·` on primary when multiple unacked Done
+- Hover card: activity feed, Done file list / assistant summary, **Open Codex|Cursor**, **Dismiss**, ~7s removal after ack
+- Dual **Connect** toggles in Settings (`~/.codex/config.toml`, `~/.cursor/hooks.json`)
 
 **Polish still open:**
 
-- Staggered exit when multiple Done sessions ack in a row.
-- Tune delay (currently 7s fixed in `sessions.ts`).
+- Staggered dot exit when multiple Done sessions ack in a row
+- Tune post-ack removal delay (currently 7s in `sessions.ts`)
+- Optional: ack Done when user focuses agent from outside the overlay (today: **Dismiss** or hover **Open**)
+
+---
+
+## Explore / future: fleet bar dot encoding (UX)
+
+**Not committed design** — for later dogfooding with mixed Codex + Cursor sessions.
+
+Today fleet dots encode **status only**; app identity lives on the **primary line** (`Codex` / `Cursor`). Options to explore:
+
+- **App color** — tint dots by agent (Cursor vs Codex) instead of or in addition to status
+- **Status-only** — keep current model; rely on primary line for app
+- **Hybrid** — e.g. app hue + status pulse, shape per app, or fixed slot order (Codex left, Cursor right)
+
+Tradeoff: mixed-fleet glanceability vs reading state at a dot row. User will explore when running both agents daily.
 
 ---
 
@@ -91,7 +77,7 @@ Settings exposes an opacity slider; the value is stored in memory but does not a
 ## 4. Stall detection
 
 **Problem**
-In full-auto Codex mode, long gaps with no hook events can mean "still thinking / big edit" or "stuck." The compact row should surface ambiguity without crying wolf.
+In full-auto agent mode, long gaps with no hook events can mean "still thinking / big edit" or "stuck." The compact row should surface ambiguity without crying wolf.
 
 **Desired behavior**
 
@@ -102,7 +88,7 @@ In full-auto Codex mode, long gaps with no hook events can mean "still thinking 
 
 **Technical notes**
 
-- Derived state in Rust: a 1 Hz tick or event-driven `last_event_at` comparison; no change to Codex config.
+- Derived state in Rust: a 1 Hz tick or event-driven `last_event_at` comparison; no change to agent hook config.
 - Configurable threshold later (default 3m).
 
 ---
@@ -131,5 +117,6 @@ Replace the placeholder generated icon with a deliberate mark once the product n
 
 ## Out of scope for this document
 
-- Cursor / Claude hook integrations (separate milestone after Codex polish).
+- **Claude Code** hook integration (planned; same hook relay pattern).
+- **Project-level** `.cursor/hooks.json` (user-level only today).
 - Installer / auto-update / code signing (shipping milestone).

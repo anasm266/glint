@@ -50,5 +50,6 @@ Pointer over the **pill row** or **fleet bar** expands the main window (~380×30
 ## Not in the panel
 
 - No elapsed/clock toggle (removed; tooltip carries absolute times).
-- Fleet dots do not open/focus the agent — they only change primary selection temporarily.
-- Cursor `afterFileEdit` updates file diff totals and activity; `Stop` uses `status` not assistant message.
+- Fleet dots are **status-colored only** (not app-colored); app name is on the compact primary line.
+- Fleet dot click = **temporary** primary only (no focus); use **Open Codex** / **Open Cursor** to focus.
+- Cursor: `afterFileEdit` updates file diff totals; `Stop` uses `status` (`completed` / `aborted` / `error`), not `last_assistant_message`. Hook stdin may include a UTF-8 BOM (stripped in `overlay-hook.exe`).
