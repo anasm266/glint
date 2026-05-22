@@ -62,6 +62,14 @@ fn default_activity_count() -> u32 {
 }
 
 const MAX_ACTIVITY_ENTRIES: usize = 8;
+const PARALLEL_MAX_ITEMS: usize = 3;
+const PARALLEL_MAX_CHARS: usize = 120;
+
+#[derive(Debug, Clone)]
+struct BufferedActivity {
+    summary: String,
+    dedupe_key: String,
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -86,7 +94,9 @@ pub struct Session {
     #[serde(skip)]
     pub turn_activity_turn_id: String,
     #[serde(skip)]
-    pub turn_activity_summaries: Vec<String>,
+    turn_activity_entries: Vec<BufferedActivity>,
+    #[serde(skip)]
+    pub last_bash_command: String,
     #[serde(skip)]
     pub next_activity_seq: u64,
     #[serde(skip)]
@@ -116,7 +126,8 @@ impl Session {
             done_summary: None,
             last_turn_id: String::new(),
             turn_activity_turn_id: String::new(),
-            turn_activity_summaries: Vec::new(),
+            turn_activity_entries: Vec::new(),
+            last_bash_command: String::new(),
             next_activity_seq: 0,
             parent_pid,
             files_edited_map: HashMap::new(),
@@ -166,21 +177,43 @@ impl Session {
         self.files_edited = v;
     }
 
-    fn flush_turn_activity(&mut self, at_ms: u64) {
-        if self.turn_activity_summaries.is_empty() {
+    fn flush_turn_activity(&mut self, at_ms: u64, turn_id: &str) {
+        if self.turn_activity_entries.is_empty() {
             return;
         }
-        if self.turn_activity_summaries.len() == 1 {
-            let summary = self.turn_activity_summaries[0].clone();
-            self.push_activity_with_kind(summary, at_ms, ActivityKind::Normal, "");
+        let summary = if self.turn_activity_entries.len() == 1 {
+            self.turn_activity_entries[0].summary.clone()
         } else {
-            let n = self.turn_activity_summaries.len();
-            let summary = format!("{n} commands in parallel");
-            self.push_activity_with_kind(summary, at_ms, ActivityKind::Normal, "");
-        }
-        self.turn_activity_summaries.clear();
+            let summaries: Vec<String> = self
+                .turn_activity_entries
+                .iter()
+                .map(|e| e.summary.clone())
+                .collect();
+            format_parallel_summary(&summaries)
+        };
+        self.push_activity_with_kind(summary, at_ms, ActivityKind::Normal, turn_id);
+        self.turn_activity_entries.clear();
         self.turn_activity_turn_id.clear();
     }
+}
+
+fn format_parallel_summary(summaries: &[String]) -> String {
+    let n = summaries.len();
+    let show = n.min(PARALLEL_MAX_ITEMS);
+    let joined = summaries[..show].join(" · ");
+    let mut out = format!("Parallel: {joined}");
+    if n > PARALLEL_MAX_ITEMS {
+        out.push_str(&format!(" · +{} more", n - PARALLEL_MAX_ITEMS));
+    }
+    truncate(&out, PARALLEL_MAX_CHARS)
+}
+
+fn activity_dedupe_key(raw_cmd: &str) -> String {
+    strip_shell_noise(raw_cmd)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
 }
 
 fn project_basename(cwd: &str) -> String {
@@ -304,7 +337,7 @@ pub fn apply(map: &mut HashMap<String, Session>, raw: RawEvent) -> Option<String
             entry.last_prompt = String::new();
             entry.recent_activity.clear();
             entry.next_activity_seq = 0;
-            entry.turn_activity_summaries.clear();
+            entry.turn_activity_entries.clear();
             entry.turn_activity_turn_id.clear();
             entry.done_summary = None;
         }
@@ -316,7 +349,7 @@ pub fn apply(map: &mut HashMap<String, Session>, raw: RawEvent) -> Option<String
             entry.last_prompt = String::new();
             entry.recent_activity.clear();
             entry.next_activity_seq = 0;
-            entry.turn_activity_summaries.clear();
+            entry.turn_activity_entries.clear();
             entry.turn_activity_turn_id.clear();
             entry.done_summary = None;
             if let Some(prompt) = extract_user_prompt(p) {
@@ -328,16 +361,40 @@ pub fn apply(map: &mut HashMap<String, Session>, raw: RawEvent) -> Option<String
         }
         "PreToolUse" => {
             entry.status = Status::Working;
+            let tool = p.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
+            if tool == "Bash" {
+                let cmd = p
+                    .get("tool_input")
+                    .and_then(|v| v.get("command"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                entry.last_bash_command = cmd.to_string();
+            }
             let action = describe_pre_tool(p);
             let turn_id = p.get("turn_id").and_then(|v| v.as_str()).unwrap_or("");
             if !entry.turn_activity_turn_id.is_empty() && turn_id != entry.turn_activity_turn_id {
-                entry.flush_turn_activity(raw.ts);
+                let flush_tid = entry.turn_activity_turn_id.clone();
+                entry.flush_turn_activity(raw.ts, flush_tid.as_str());
             }
-            if !action.is_empty() && !entry.turn_activity_summaries.contains(&action) {
-                entry.turn_activity_summaries.push(action.clone());
-                if entry.turn_activity_summaries.len() > 8 {
-                    let excess = entry.turn_activity_summaries.len() - 8;
-                    entry.turn_activity_summaries.drain(0..excess);
+            if !action.is_empty() {
+                let dedupe_key = if tool == "Bash" {
+                    activity_dedupe_key(&entry.last_bash_command)
+                } else {
+                    action.clone()
+                };
+                let already = entry
+                    .turn_activity_entries
+                    .iter()
+                    .any(|e| e.dedupe_key == dedupe_key);
+                if !already {
+                    entry.turn_activity_entries.push(BufferedActivity {
+                        summary: action.clone(),
+                        dedupe_key,
+                    });
+                    if entry.turn_activity_entries.len() > 8 {
+                        let excess = entry.turn_activity_entries.len() - 8;
+                        entry.turn_activity_entries.drain(0..excess);
+                    }
                 }
             }
             if !turn_id.is_empty() {
@@ -347,7 +404,8 @@ pub fn apply(map: &mut HashMap<String, Session>, raw: RawEvent) -> Option<String
             entry.last_turn_id = turn_id.to_string();
         }
         "PostToolUse" => {
-            entry.flush_turn_activity(raw.ts);
+            let flush_tid = entry.turn_activity_turn_id.clone();
+            entry.flush_turn_activity(raw.ts, flush_tid.as_str());
             track_files_from_post(entry, p);
             let tool = p.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
             let response = p
@@ -356,6 +414,11 @@ pub fn apply(map: &mut HashMap<String, Session>, raw: RawEvent) -> Option<String
                 .unwrap_or("");
             if tool == "Bash" {
                 parse_gh_pr_post(entry, response, raw.ts);
+                parse_gh_issue_post(entry, response, raw.ts);
+                parse_rg_post(entry, response, raw.ts);
+                parse_git_log_post(entry, response, raw.ts);
+                parse_git_blame_post(entry, response, raw.ts);
+                parse_node_probe_post(entry, response, raw.ts);
                 if let Some((passed, failed)) = parse_test_result(response) {
                     let summary = if failed == 0 {
                         format!("{passed} tests passed")
@@ -369,14 +432,17 @@ pub fn apply(map: &mut HashMap<String, Session>, raw: RawEvent) -> Option<String
                     };
                     entry.push_activity_with_kind(summary, raw.ts, kind, "");
                 }
-                if let Some(hash) = parse_commit_hash(response) {
-                    entry.last_commit_hash = Some(hash);
+                if should_parse_commit_hash(&entry.last_bash_command) {
+                    if let Some(hash) = parse_commit_hash(response) {
+                        entry.last_commit_hash = Some(hash);
+                    }
                 }
             }
             entry.current_action = "Thinking…".to_string();
         }
         "Stop" => {
-            entry.flush_turn_activity(raw.ts);
+            let flush_tid = entry.turn_activity_turn_id.clone();
+            entry.flush_turn_activity(raw.ts, flush_tid.as_str());
             entry.status = Status::Done;
             if let Some(msg) = p.get("last_assistant_message").and_then(|v| v.as_str()) {
                 let summary = extract_done_summary(msg);
@@ -516,8 +582,34 @@ fn humanize_tool(name: &str) -> String {
 // single format! call that may occur at the call site.
 
 fn describe_bash(raw: &str) -> String {
+    if let Some(label) = classify_pipeline_or_heredoc(raw) {
+        return label;
+    }
     let cmd = strip_shell_noise(raw);
     classify_bash(cmd)
+}
+
+fn classify_pipeline_or_heredoc(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let heredoc = trimmed.starts_with("@'")
+        || trimmed.contains("'@ |")
+        || trimmed.contains("'@|");
+    if heredoc || trimmed.contains('|') {
+        if let Some(rhs) = trimmed.rsplit('|').next() {
+            let rhs = strip_shell_noise(rhs.trim());
+            let verb = rhs.split_whitespace().next()?.to_ascii_lowercase();
+            if matches!(verb.as_str(), "node" | "ts-node" | "tsx" | "deno") {
+                let rest = rhs[verb.len()..].trim();
+                return Some(classify_node(rest));
+            }
+            if heredoc {
+                return Some("Running inline script".to_string());
+            }
+        } else if heredoc {
+            return Some("Running inline script".to_string());
+        }
+    }
+    None
 }
 
 /// Strip PowerShell preamble, `cd X &&` prefixes and interpreter wrappers.
@@ -630,11 +722,11 @@ fn classify_bash(cmd: &str) -> String {
         "powershell" | "pwsh" => classify_script(rest),
 
         // ── Git / GitHub CLI ─────────────────────────────────────────────────
-        "git" => classify_git(first_non_flag(rest)),
+        "git" => classify_git(rest),
         "gh" => classify_gh(cmd),
 
         // ── File reading ────────────────────────────────────────────────────
-        "cat" | "type" | "get-content" | "gc" | "head" | "tail" | "less" | "more" => {
+        "cat" | "type" | "head" | "tail" | "less" | "more" => {
             let target = first_non_flag(rest);
             if looks_like_path(target) {
                 format!("Reading: {}", basename(target))
@@ -642,6 +734,7 @@ fn classify_bash(cmd: &str) -> String {
                 "Reading file".to_string()
             }
         }
+        "get-content" | "gc" => classify_get_content(rest),
 
         // ── Directory listing ───────────────────────────────────────────────
         "ls" | "dir" | "get-childitem" | "gci" | "exa" | "lsd" => {
@@ -649,9 +742,8 @@ fn classify_bash(cmd: &str) -> String {
         }
 
         // ── Search ──────────────────────────────────────────────────────────
-        "grep" | "rg" | "ripgrep" | "ag" | "ack" | "fgrep" | "egrep" => {
-            "Searching code".to_string()
-        }
+        "grep" | "ag" | "ack" | "fgrep" | "egrep" => "Searching code".to_string(),
+        "rg" | "ripgrep" => classify_rg(rest),
         "find" => "Searching files".to_string(),
 
         // ── File manipulation ───────────────────────────────────────────────
@@ -759,6 +851,19 @@ fn parse_test_result(response: &str) -> Option<(u32, u32)> {
     }
 }
 
+fn should_parse_commit_hash(last_cmd: &str) -> bool {
+    if last_cmd.is_empty() {
+        return false;
+    }
+    let cmd = strip_shell_noise(last_cmd).to_ascii_lowercase();
+    cmd.contains("git commit")
+        || cmd.contains("git push")
+        || cmd.contains("git cherry-pick")
+        || cmd.contains("git merge")
+        || cmd.contains("git rebase")
+        || cmd.contains("git am")
+}
+
 fn parse_commit_hash(response: &str) -> Option<String> {
     for line in response.lines() {
         let line = line.trim();
@@ -810,6 +915,131 @@ fn parse_gh_pr_post(entry: &mut Session, response: &str, at_ms: u64) {
         summary.push_str(&label);
     }
     entry.push_activity_with_kind(summary, at_ms, ActivityKind::Normal, "");
+}
+
+fn parse_gh_issue_post(entry: &mut Session, response: &str, at_ms: u64) {
+    let trimmed = response.trim();
+    if !trimmed.contains("\"title\":") || !trimmed.contains("\"state\":") {
+        return;
+    }
+    if trimmed.contains("\"headRefOid\":") {
+        return;
+    }
+
+    let number = extract_json_u32(trimmed, "\"number\":");
+    let title = extract_json_string(trimmed, "\"title\":");
+    let state = extract_json_string(trimmed, "\"state\":");
+
+    let mut summary = if let Some(n) = number {
+        format!("Issue #{n}")
+    } else {
+        "Issue".to_string()
+    };
+    if let Some(ref st) = state {
+        summary.push_str(" · ");
+        summary.push_str(st);
+    }
+    if let Some(ref t) = title {
+        summary.push_str(" · ");
+        summary.push_str(&truncate(t, 40));
+    }
+    entry.push_activity_with_kind(summary, at_ms, ActivityKind::Normal, "");
+}
+
+fn is_rg_match_line(line: &str) -> bool {
+    if line
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_digit() && line.contains(':'))
+    {
+        return true;
+    }
+    let parts: Vec<&str> = line.splitn(3, ':').collect();
+    parts.len() >= 2
+        && !parts[1].is_empty()
+        && parts[1].chars().all(|c| c.is_ascii_digit())
+}
+
+fn parse_rg_post(entry: &mut Session, response: &str, at_ms: u64) {
+    let mut matches: Vec<&str> = Vec::new();
+    for line in response.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if is_rg_match_line(line) {
+            matches.push(line);
+        }
+    }
+    if matches.is_empty() {
+        return;
+    }
+    let summary = if matches.len() == 1 {
+        let content = matches[0]
+            .split_once(':')
+            .map(|(_, r)| r.trim())
+            .unwrap_or(matches[0]);
+        format!("Match: {}", truncate(content, 60))
+    } else {
+        format!("Found {} matches", matches.len())
+    };
+    entry.push_activity_with_kind(summary, at_ms, ActivityKind::Normal, "");
+}
+
+fn parse_git_log_post(entry: &mut Session, response: &str, at_ms: u64) {
+    let mut commits = 0u32;
+    for line in response.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((hash, _msg)) = line.split_once(char::is_whitespace) else {
+            continue;
+        };
+        if (7..=12).contains(&hash.len()) && hash.chars().all(|c| c.is_ascii_hexdigit()) {
+            commits += 1;
+        }
+    }
+    if commits == 0 {
+        return;
+    }
+    let summary = format!("Git history ({commits} commits)");
+    entry.push_activity_with_kind(summary, at_ms, ActivityKind::Normal, "");
+}
+
+fn parse_git_blame_post(entry: &mut Session, response: &str, at_ms: u64) {
+    if !response.contains('(') || !response.to_ascii_lowercase().contains("author") {
+        return;
+    }
+    let path = response
+        .lines()
+        .find_map(|l| {
+            let l = l.trim();
+            if looks_like_path(l) {
+                Some(basename(l).to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| "file".to_string());
+    let summary = format!("Blamed lines in {path}");
+    entry.push_activity_with_kind(summary, at_ms, ActivityKind::Normal, "");
+}
+
+fn parse_node_probe_post(entry: &mut Session, response: &str, at_ms: u64) {
+    for line in response.lines() {
+        let line = line.trim();
+        let Some(case_name) = line.strip_prefix("CASE:") else {
+            continue;
+        };
+        let case_name = case_name.trim();
+        if case_name.is_empty() {
+            continue;
+        }
+        let summary = format!("Type check: {}", truncate(case_name, 48));
+        entry.push_activity_with_kind(summary, at_ms, ActivityKind::Success, "");
+        return;
+    }
 }
 
 fn extract_json_u32(s: &str, key: &str) -> Option<u32> {
@@ -1048,7 +1278,18 @@ fn classify_script(rest: &str) -> String {
 }
 
 fn classify_git(sub: &str) -> String {
-    match sub {
+    let sub_lc = sub.to_ascii_lowercase();
+    if sub_lc.starts_with("log") && sub.split_whitespace().any(|t| t.eq_ignore_ascii_case("-s")) {
+        return "Searching git history".to_string();
+    }
+    if sub_lc.starts_with("blame") && sub.split_whitespace().any(|t| t.eq_ignore_ascii_case("-l")) {
+        if let Some(path) = git_blame_path(sub) {
+            return format!("Blaming lines in {}", basename(&path));
+        }
+        return "Blaming lines".to_string();
+    }
+    let verb = first_non_flag(sub);
+    match verb {
         "status" | "diff" | "log" | "show" | "blame" | "shortlog" => {
             "Checking git state".to_string()
         }
@@ -1064,6 +1305,74 @@ fn classify_git(sub: &str) -> String {
         "tag" => "Tagging commit".to_string(),
         "remote" => "Managing remotes".to_string(),
         _ => "Git operation".to_string(),
+    }
+}
+
+fn git_blame_path(sub: &str) -> Option<String> {
+    let tokens: Vec<&str> = sub.split_whitespace().collect();
+    let mut after_dashes = false;
+    for t in tokens.iter().skip(1) {
+        if *t == "--" {
+            after_dashes = true;
+            continue;
+        }
+        if after_dashes && !t.starts_with('-') && looks_like_path(t) {
+            return Some((*t).to_string());
+        }
+    }
+    tokens
+        .iter()
+        .rev()
+        .find(|t| !t.starts_with('-') && looks_like_path(t))
+        .map(|s| (*s).to_string())
+}
+
+fn classify_get_content(rest: &str) -> String {
+    let mut skip: Option<u32> = None;
+    let mut first: Option<u32> = None;
+    let tokens: Vec<&str> = rest.split_whitespace().collect();
+    let mut i = 0;
+    while i < tokens.len() {
+        let t = tokens[i].to_ascii_lowercase();
+        if t == "-skip" && i + 1 < tokens.len() {
+            skip = tokens[i + 1].parse().ok();
+            i += 2;
+            continue;
+        }
+        if t == "-first" && i + 1 < tokens.len() {
+            first = tokens[i + 1].parse().ok();
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+    let path = tokens
+        .iter()
+        .rev()
+        .find(|t| looks_like_path(t))
+        .map(|p| basename(p).to_string())
+        .unwrap_or_else(|| "file".to_string());
+    if let (Some(s), Some(f)) = (skip, first) {
+        let start = s + 1;
+        let end = s + f;
+        return format!("Reading lines {start}–{end} of {path}");
+    }
+    if let Some(s) = skip {
+        return format!("Reading from line {} of {path}", s + 1);
+    }
+    format!("Reading: {path}")
+}
+
+fn classify_rg(rest: &str) -> String {
+    let path = rest
+        .split_whitespace()
+        .rev()
+        .find(|t| looks_like_path(t))
+        .map(|p| basename(p).to_string());
+    if let Some(p) = path {
+        format!("Searching {p}")
+    } else {
+        "Searching code".to_string()
     }
 }
 
@@ -1099,6 +1408,41 @@ fn git_branch_name_after_delete_flag(rest: &str) -> Option<String> {
         .rev()
         .find(|t| !t.starts_with('-') && **t != "branch")
         .map(|s| s.to_string())
+}
+
+fn parse_gh_issue_number(cmd: &str) -> Option<u32> {
+    let lower = cmd.to_ascii_lowercase();
+    if let Some(idx) = lower.find("issues/") {
+        let rest = &lower[idx + 7..];
+        let num: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        return num.parse().ok();
+    }
+    let tokens: Vec<&str> = cmd.split_whitespace().collect();
+    for (i, t) in tokens.iter().enumerate() {
+        if t.eq_ignore_ascii_case("issue") && i + 1 < tokens.len() {
+            let sub = tokens[i + 1];
+            if sub.eq_ignore_ascii_case("view") && i + 2 < tokens.len() {
+                let n = tokens[i + 2].trim_matches(|c: char| !c.is_ascii_digit());
+                if let Ok(num) = n.parse::<u32>() {
+                    return Some(num);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn extract_gh_repo_flag(cmd: &str) -> Option<String> {
+    let tokens: Vec<&str> = cmd.split_whitespace().collect();
+    for (i, t) in tokens.iter().enumerate() {
+        if *t == "--repo" && i + 1 < tokens.len() {
+            return Some(tokens[i + 1].to_string());
+        }
+    }
+    None
 }
 
 fn parse_gh_pr_number(cmd: &str) -> Option<u32> {
@@ -1140,6 +1484,17 @@ fn classify_gh(cmd: &str) -> String {
             return format!("Viewing PR #{n}");
         }
         return "Viewing PR".to_string();
+    }
+    if lower.contains("issue view") {
+        if let Some(n) = parse_gh_issue_number(cmd) {
+            let mut label = format!("Viewing issue #{n}");
+            if let Some(repo) = extract_gh_repo_flag(cmd) {
+                label.push_str(" · ");
+                label.push_str(&truncate(&repo, 40));
+            }
+            return label;
+        }
+        return "Viewing issue".to_string();
     }
     if lower.contains("pr edit") {
         if let Some(n) = parse_gh_pr_number(cmd) {
@@ -1217,4 +1572,108 @@ fn truncate(s: &str, n: usize) -> String {
     let mut out: String = s.chars().take(n.saturating_sub(1)).collect();
     out.push('…');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn describe_bash_gh_issue_view() {
+        let cmd = "gh issue view 8737 --repo typescript-eslint/typescript-eslint";
+        assert_eq!(describe_bash(cmd), "Viewing issue #8737 · typescript-eslint/typescript-eslint");
+    }
+
+    #[test]
+    fn describe_bash_heredoc_pipe_node() {
+        let cmd = "@'\nconsole.log(1)\n'@ | node";
+        let label = describe_bash(cmd);
+        assert!(
+            label.contains("inline script") || label.contains("Node") || label.contains("Running"),
+            "unexpected: {label}"
+        );
+    }
+
+    #[test]
+    fn describe_bash_git_log_s() {
+        assert_eq!(describe_bash("git log -S foo --oneline"), "Searching git history");
+    }
+
+    #[test]
+    fn describe_bash_git_blame_l() {
+        assert_eq!(
+            describe_bash("git blame -L 10,20 -- src/foo.ts"),
+            "Blaming lines in foo.ts"
+        );
+    }
+
+    #[test]
+    fn describe_bash_get_content_line_range() {
+        assert_eq!(
+            describe_bash("Get-Content foo.ts -Skip 680 -First 260"),
+            "Reading lines 681–940 of foo.ts"
+        );
+    }
+
+    #[test]
+    fn describe_bash_rg_basename() {
+        assert_eq!(
+            describe_bash("rg no-unnecessary-type-assertion src/rules/no-unnecessary-type-assertion.ts"),
+            "Searching no-unnecessary-type-assertion.ts"
+        );
+    }
+
+    #[test]
+    fn format_parallel_summary_joins_and_caps() {
+        let summaries = vec![
+            "Searching a.ts".to_string(),
+            "Reading lines 1–2 of b.ts".to_string(),
+            "Viewing issue #1".to_string(),
+            "Listing directory".to_string(),
+        ];
+        let out = format_parallel_summary(&summaries);
+        assert!(out.starts_with("Parallel: "));
+        assert!(out.contains(" · "));
+        assert!(out.contains("+1 more"));
+    }
+
+    #[test]
+    fn activity_dedupe_key_normalizes() {
+        let a = activity_dedupe_key("  GIT   status  ");
+        let b = activity_dedupe_key("git status");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn should_parse_commit_hash_only_for_commit_ops() {
+        assert!(should_parse_commit_hash("git commit -m msg"));
+        assert!(should_parse_commit_hash("git push origin main"));
+        assert!(!should_parse_commit_hash("git log --oneline -5"));
+    }
+
+    #[test]
+    fn parse_gh_issue_post_pushes_activity() {
+        let mut s = Session::new("t".into(), "/tmp".into(), None, 0);
+        let json = r#"{"number":8737,"title":"Bug report","state":"closed"}"#;
+        parse_gh_issue_post(&mut s, json, 1);
+        assert_eq!(s.recent_activity.len(), 1);
+        assert!(s.recent_activity[0].summary.contains("Issue #8737"));
+        assert!(s.recent_activity[0].summary.contains("closed"));
+    }
+
+    #[test]
+    fn parse_rg_post_counts_matches() {
+        let mut s = Session::new("t".into(), "/tmp".into(), None, 0);
+        let out = "src/a.ts:10: match one\nsrc/a.ts:20: match two\n";
+        parse_rg_post(&mut s, out, 1);
+        assert_eq!(s.recent_activity.len(), 1);
+        assert!(s.recent_activity[0].summary.contains("2 matches"));
+    }
+
+    #[test]
+    fn parse_commit_hash_from_log_output_denied() {
+        let log_out = "a1b2c3d Fix something\n";
+        assert!(parse_commit_hash(log_out).is_some());
+        assert!(!should_parse_commit_hash("git log --oneline"));
+    }
 }
