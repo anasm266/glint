@@ -4,6 +4,7 @@
 //! configuration lives here.
 
 mod commands;
+mod cursor_hook_install;
 mod hook_install;
 mod http_server;
 mod session;
@@ -41,10 +42,14 @@ pub fn run() {
             commands::get_sessions,
             commands::remove_session,
             commands::open_codex,
+            commands::open_cursor,
             commands::acknowledge_done,
             commands::install_codex_hooks,
             commands::remove_codex_hooks,
             commands::is_codex_connected,
+            commands::install_cursor_hooks,
+            commands::remove_cursor_hooks,
+            commands::is_cursor_connected,
             commands::get_settings,
             commands::set_position,
             commands::set_opacity,

@@ -11,7 +11,7 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
 };
 #[cfg(windows)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AllowSetForegroundWindow, EnumWindows, GetWindowTextW, GetWindowThreadProcessId,
+    AllowSetForegroundWindow, EnumWindows, GetWindowThreadProcessId,
     IsWindowVisible, SetForegroundWindow, ShowWindow, SW_RESTORE,
 };
 
@@ -47,10 +47,52 @@ pub fn root_codex_pid(pid: u32) -> Option<u32> {
 }
 
 #[cfg(windows)]
+pub fn root_cursor_pid(pid: u32) -> Option<u32> {
+    let candidates = [
+        "Cursor.exe",
+        "cursor.exe",
+        "Cursor Helper.exe",
+        "Cursor Helper (Renderer).exe",
+    ];
+    let map = process_map()?;
+
+    let mut current = pid;
+    for _ in 0..16 {
+        let entry = map.iter().find(|e| e.pid == current)?;
+        if candidates
+            .iter()
+            .any(|c| entry.name.eq_ignore_ascii_case(c))
+        {
+            return Some(entry.pid);
+        }
+        current = entry.parent_pid;
+        if current == 0 {
+            break;
+        }
+    }
+
+    map.iter()
+        .find(|e| e.name.to_lowercase().contains("cursor"))
+        .map(|e| e.pid)
+}
+
+#[cfg(windows)]
 pub fn focus_pid(pid: u32) -> bool {
+    focus_window_for_pid(pid, "Codex")
+}
+
+#[cfg(windows)]
+pub fn focus_cursor(pid: u32) -> bool {
+    focus_window_for_pid(pid, "Cursor")
+}
+
+#[cfg(windows)]
+fn focus_window_for_pid(pid: u32, title_fragment: &str) -> bool {
     let hwnd = find_top_window_for_pid(pid)
-        .or_else(|| find_window_by_title_fragment("Codex"));
-    let Some(hwnd) = hwnd else { return false };
+        .or_else(|| find_window_by_title_fragment(title_fragment));
+    let Some(hwnd) = hwnd else {
+        return false;
+    };
     unsafe {
         let _ = AllowSetForegroundWindow(pid);
         let _ = ShowWindow(hwnd, SW_RESTORE);
@@ -166,6 +208,16 @@ pub fn root_codex_pid(_pid: u32) -> Option<u32> {
 }
 
 #[cfg(not(windows))]
+pub fn root_cursor_pid(_pid: u32) -> Option<u32> {
+    None
+}
+
+#[cfg(not(windows))]
 pub fn focus_pid(_pid: u32) -> bool {
+    false
+}
+
+#[cfg(not(windows))]
+pub fn focus_cursor(_pid: u32) -> bool {
     false
 }

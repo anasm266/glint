@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager, State};
 
+use crate::cursor_hook_install;
 use crate::hook_install;
-use crate::session::{Session, Status};
+use crate::session::{App, Session, Status};
 use crate::state::{Corner, Settings, SharedState};
 use crate::win;
 
@@ -47,6 +48,37 @@ pub fn open_codex(
     };
     let target = win::root_codex_pid(pid).unwrap_or(pid);
     Ok(win::focus_pid(target))
+}
+
+#[tauri::command]
+pub fn open_cursor(
+    id: Option<String>,
+    state: State<'_, SharedState>,
+) -> Result<bool, String> {
+    let parent_pid = state.with_sessions(|m| {
+        if let Some(ref sid) = id {
+            m.get(sid).and_then(|s| s.parent_pid)
+        } else {
+            let mut best: Option<(u64, u32)> = None;
+            for s in m.values() {
+                if s.app != App::Cursor {
+                    continue;
+                }
+                if let Some(pid) = s.parent_pid {
+                    let t = s.last_event_at_ms;
+                    if best.as_ref().map(|(bt, _)| t > *bt).unwrap_or(true) {
+                        best = Some((t, pid));
+                    }
+                }
+            }
+            best.map(|(_, p)| p)
+        }
+    });
+    let Some(pid) = parent_pid else {
+        return Ok(false);
+    };
+    let target = win::root_cursor_pid(pid).unwrap_or(pid);
+    Ok(win::focus_cursor(target))
 }
 
 #[tauri::command]
@@ -99,10 +131,46 @@ pub fn is_codex_connected() -> bool {
 }
 
 #[tauri::command]
+pub fn install_cursor_hooks(
+    state: State<'_, SharedState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    let exe = hook_exe_path(&app).map_err(err)?;
+    tracing::info!("install_cursor_hooks: using hook binary at {}", exe.display());
+    cursor_hook_install::install(&exe).map_err(|e| {
+        tracing::error!("install_cursor_hooks failed: {e:?}");
+        err(e)
+    })?;
+    state.set_settings(|s| s.cursor_connected = true);
+    tracing::info!("install_cursor_hooks: ok");
+    Ok(())
+}
+
+#[tauri::command]
+pub fn remove_cursor_hooks(state: State<'_, SharedState>) -> Result<(), String> {
+    cursor_hook_install::remove().map_err(|e| {
+        tracing::error!("remove_cursor_hooks failed: {e:?}");
+        err(e)
+    })?;
+    state.set_settings(|s| s.cursor_connected = false);
+    tracing::info!("remove_cursor_hooks: ok");
+    Ok(())
+}
+
+#[tauri::command]
+pub fn is_cursor_connected() -> bool {
+    cursor_hook_install::is_installed()
+}
+
+#[tauri::command]
 pub fn get_settings(state: State<'_, SharedState>) -> Settings {
     let mut s = state.settings();
     s.codex_connected = hook_install::is_installed();
-    state.set_settings(|x| x.codex_connected = s.codex_connected);
+    s.cursor_connected = cursor_hook_install::is_installed();
+    state.set_settings(|x| {
+        x.codex_connected = s.codex_connected;
+        x.cursor_connected = s.cursor_connected;
+    });
     s
 }
 

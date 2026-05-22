@@ -16,11 +16,12 @@ const dotColor: Record<Status, string> = {
 export default function FleetBar({
   sessions,
   primaryId,
-  codexConnected,
+  hooksConnected,
 }: {
   sessions: SessionDTO[];
   primaryId?: string;
-  codexConnected?: boolean;
+  /** True when Codex or Cursor hooks are installed. */
+  hooksConnected?: boolean;
 }) {
   const tempSelectedId = useSessions((s) => s.tempSelectedId);
   const tempSelect = useSessions((s) => s.tempSelect);
@@ -78,7 +79,7 @@ export default function FleetBar({
         </span>
       )}
       <AnimatePresence initial={false}>
-        {!codexConnected && (
+        {!hooksConnected && (
           <motion.span
             key="disconnected"
             layout
@@ -86,7 +87,7 @@ export default function FleetBar({
             animate={{ scale: 1, opacity: 1 }}
             exit={{ scale: 0.4, opacity: 0 }}
             transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-            title="Codex hooks not installed — click to open Settings"
+            title="Hooks not installed — click to open Settings"
             className={clsx(
               "block h-1.5 w-1.5 shrink-0 rounded-full",
               "ring-1 ring-amber-400/55",

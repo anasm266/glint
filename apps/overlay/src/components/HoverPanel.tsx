@@ -301,10 +301,14 @@ function ActionStrip({ session, now }: { session: SessionDTO; now: number }) {
   const isErrored = session.status === "errored";
   const isDoneEmpty = session.status === "done" && !hasFiles;
 
-  const openCodex = (e: React.MouseEvent) => {
+  const openAgent = (e: React.MouseEvent) => {
     e.stopPropagation();
-    invoke("open_codex", { id: session.id }).catch(() => {});
+    const cmd = session.app === "cursor" ? "open_cursor" : "open_codex";
+    invoke(cmd, { id: session.id }).catch(() => {});
   };
+
+  const openAgentLabel =
+    session.app === "cursor" ? "Open Cursor" : "Open Codex";
 
   const dismiss = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -326,8 +330,8 @@ function ActionStrip({ session, now }: { session: SessionDTO; now: number }) {
       </span>
       <div className="flex items-center gap-1.5">
         {isWorking ? (
-          <button type="button" className={ghostBtn} onClick={openCodex}>
-            Open Codex
+          <button type="button" className={ghostBtn} onClick={openAgent}>
+            {openAgentLabel}
           </button>
         ) : null}
 
@@ -338,16 +342,16 @@ function ActionStrip({ session, now }: { session: SessionDTO; now: number }) {
                 Dismiss
               </button>
             ) : null}
-            <button type="button" className={primaryBtn} onClick={openCodex}>
-              Open Codex
+            <button type="button" className={primaryBtn} onClick={openAgent}>
+              {openAgentLabel}
             </button>
           </>
         ) : null}
 
         {isDoneEmpty ? (
           <>
-            <button type="button" className={ghostBtn} onClick={openCodex}>
-              Open Codex
+            <button type="button" className={ghostBtn} onClick={openAgent}>
+              {openAgentLabel}
             </button>
             {showDismiss ? (
               <button type="button" className={primaryBtn} onClick={dismiss}>
@@ -358,8 +362,8 @@ function ActionStrip({ session, now }: { session: SessionDTO; now: number }) {
         ) : null}
 
         {isErrored ? (
-          <button type="button" className={primaryBtn} onClick={openCodex}>
-            Open Codex
+          <button type="button" className={primaryBtn} onClick={openAgent}>
+            {openAgentLabel}
           </button>
         ) : null}
       </div>

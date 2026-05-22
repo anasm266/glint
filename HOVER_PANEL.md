@@ -17,7 +17,7 @@ Pointer over the **pill row** or **fleet bar** expands the main window (~380×30
 │ Parallel: git status · rg foo · npm test     │  activity feed (optional)
 │ 12 tests passed                              │  success/failure tint
 │                                              │
-│ Running 4m 20s          [Open Codex]         │  action strip
+│ Running 4m 20s     [Open Codex / Open Cursor] │  action strip
 └──────────────────────────────────────────────┘
 ```
 
@@ -43,11 +43,12 @@ Pointer over the **pill row** or **fleet bar** expands the main window (~380×30
 
 | Control | Effect |
 |---------|--------|
-| Open Codex | `open_codex` — focus Codex window for session (`parent_pid` chain) |
+| Open Codex / Open Cursor | `open_codex` or `open_cursor` — focus agent window by `session.app` (`parent_pid` chain + process name walk) |
 | Dismiss | `acknowledge_done` — marks Done acknowledged; fleet removal ~7s later |
 | Time label | Elapsed only in UI; `title` tooltip has absolute start/finish |
 
 ## Not in the panel
 
 - No elapsed/clock toggle (removed; tooltip carries absolute times).
-- Fleet dots do not open/focus Codex — they only change primary selection temporarily.
+- Fleet dots do not open/focus the agent — they only change primary selection temporarily.
+- Cursor `afterFileEdit` updates file diff totals and activity; `Stop` uses `status` not assistant message.

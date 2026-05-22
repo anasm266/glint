@@ -29,11 +29,14 @@ export default function CompactView() {
   const sessions = useSessions((s) => s.sessions);
   const corner = useSessions((s) => s.corner);
   const codexConnected = useSessions((s) => s.codexConnected);
+  const cursorConnected = useSessions((s) => s.cursorConnected);
+  const hooksConnected = codexConnected || cursorConnected;
   const pillPanelHovered = useSessions((s) => s.pillPanelHovered);
   const setPillPanelHovered = useSessions((s) => s.setPillPanelHovered);
   const clearTempSelect = useSessions((s) => s.clearTempSelect);
   const setCorner = useSessions((s) => s.setCorner);
   const setCodexConnected = useSessions((s) => s.setCodexConnected);
+  const setCursorConnected = useSessions((s) => s.setCursorConnected);
 
   const primary = useSessions((s) => s.primary());
   const doneQueueCount = useSessions(
@@ -58,6 +61,7 @@ export default function CompactView() {
             const settings = await invoke<SettingsDTO>("get_settings");
             setCorner(settings.corner);
             setCodexConnected(settings.codexConnected);
+            setCursorConnected(settings.cursorConnected);
           } catch {
             /* ignore */
           }
@@ -70,7 +74,7 @@ export default function CompactView() {
     return () => {
       unlisten?.();
     };
-  }, [clearTempSelect, setCorner, setCodexConnected]);
+  }, [clearTempSelect, setCorner, setCodexConnected, setCursorConnected]);
 
   useEffect(() => {
     const expanded = pillPanelHovered && primary !== undefined;
@@ -131,7 +135,7 @@ export default function CompactView() {
       <FleetBar
         sessions={sessions}
         primaryId={primary?.id}
-        codexConnected={codexConnected}
+        hooksConnected={hooksConnected}
       />
       <div className="min-w-0 flex-1">
         <AnimatePresence mode="popLayout">
@@ -151,13 +155,13 @@ export default function CompactView() {
             </motion.div>
           ) : (
             <motion.div
-              key={codexConnected ? "empty" : "disconnected"}
+              key={hooksConnected ? "empty" : "disconnected"}
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               transition={{ duration: 0.22 }}
             >
-              {codexConnected ? (
+              {hooksConnected ? (
                 <span className="text-label text-white/35">
                   No active sessions
                 </span>
@@ -169,7 +173,7 @@ export default function CompactView() {
                     invoke("open_settings").catch(() => {});
                   }}
                 >
-                  Connect Codex to get started
+                  Connect in Settings to get started
                 </button>
               )}
             </motion.div>
