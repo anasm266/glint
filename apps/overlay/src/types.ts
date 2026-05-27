@@ -37,6 +37,9 @@ export interface SessionDTO {
 
 export type Corner = "tl" | "tr" | "bl" | "br";
 
+/** Which side of the pill the hover panel opens toward (runtime, not settings). */
+export type PanelSide = "above" | "below";
+
 export interface SettingsDTO {
   corner: Corner;
   opacity: number;

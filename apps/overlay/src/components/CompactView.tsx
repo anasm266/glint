@@ -1,29 +1,28 @@
 import { invoke } from "@tauri-apps/api/core";
-import {
-  getCurrentWindow,
-  LogicalSize,
-  PhysicalPosition,
-} from "@tauri-apps/api/window";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import clsx from "clsx";
 import { AnimatePresence, motion } from "framer-motion";
-import { useEffect } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   cancelScheduledHoverLeave,
   scheduleHoverLeaveClear,
 } from "../lib/hoverLeaveDebounce";
+import {
+  collapseWindowForPanel,
+  defaultPanelSideFromCorner,
+  expandWindowForPanel,
+  getPanelSideForWindow,
+  H_COLLAPSED,
+} from "../lib/panelPlacement";
 import { useSessions } from "../store/sessions";
-import type { SettingsDTO } from "../types";
+import type { PanelSide, SettingsDTO } from "../types";
 import FleetBar from "./FleetBar";
 import HoverPanel from "./HoverPanel";
 import PrimaryLine from "./PrimaryLine";
 import StatusBadge from "./StatusBadge";
 
-const WIN_W = 380;
-// 8px extra below the pill gives the box-shadow room to fade before hitting
-// the WebView boundary, eliminating the rectangular halo on light backgrounds.
-const H_COLLAPSED = 60;
-/** Total window height when hover panel is open — must fit pill + card + shadow buffer. */
-const H_EXPANDED = 300;
+const easeOut = [0.16, 1, 0.3, 1] as const;
+const MOTION_FAST = { duration: 0.14, ease: easeOut } as const;
 
 export default function CompactView() {
   const sessions = useSessions((s) => s.sessions);
@@ -45,10 +44,55 @@ export default function CompactView() {
         .length
   );
 
-  const panelSession =
-    pillPanelHovered && primary !== undefined ? primary : null;
+  const [panelSide, setPanelSide] = useState<PanelSide>(() =>
+    defaultPanelSideFromCorner(corner)
+  );
+  /** Native window is expanded and it is safe to render the hover panel layout. */
+  const [panelLayoutReady, setPanelLayoutReady] = useState(false);
 
-  const bottom = corner === "bl" || corner === "br";
+  const pillPanelHoveredRef = useRef(pillPanelHovered);
+  pillPanelHoveredRef.current = pillPanelHovered;
+  const openingRef = useRef(false);
+
+  /** Keep pill at window bottom while expanding upward (before panel mounts). */
+  const [pillAnchorEnd, setPillAnchorEnd] = useState(false);
+
+  const showPanel =
+    panelLayoutReady && pillPanelHovered && primary !== undefined;
+  const panelSession = showPanel ? primary : null;
+  const panelAbove = panelSide === "above";
+  const anchorPillToBottom =
+    panelAbove && (pillAnchorEnd || panelLayoutReady || pillPanelHovered);
+
+  useEffect(() => {
+    if (!pillPanelHoveredRef.current && !panelLayoutReady) {
+      setPanelSide(defaultPanelSideFromCorner(corner));
+    }
+  }, [corner, panelLayoutReady]);
+
+  const openHoverPanel = useCallback(async () => {
+    if (openingRef.current || pillPanelHoveredRef.current) return;
+    if (primary === undefined) return;
+
+    cancelScheduledHoverLeave();
+    openingRef.current = true;
+
+    try {
+      const win = getCurrentWindow();
+      const fallback = defaultPanelSideFromCorner(corner);
+      const side = await getPanelSideForWindow(win, fallback);
+      setPillAnchorEnd(side === "above");
+      setPanelSide(side);
+      await expandWindowForPanel(win, side);
+      setPanelLayoutReady(true);
+      setPillPanelHovered(true);
+    } catch {
+      setPanelLayoutReady(false);
+      setPillAnchorEnd(false);
+    } finally {
+      openingRef.current = false;
+    }
+  }, [corner, primary, setPillPanelHovered]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -77,33 +121,19 @@ export default function CompactView() {
   }, [clearTempSelect, setCorner, setCodexConnected, setCursorConnected]);
 
   useEffect(() => {
-    const expanded = pillPanelHovered && primary !== undefined;
-    const bottomCorner = corner === "bl" || corner === "br";
-    const dyLogical = H_EXPANDED - H_COLLAPSED;
+    if (pillPanelHovered || !panelLayoutReady) return;
+
+    const side = panelSide;
+    setPanelLayoutReady(false);
 
     const run = async () => {
-      const win = getCurrentWindow();
-      if (expanded) {
-        if (bottomCorner) {
-          const pos = await win.outerPosition();
-          const scale = await win.scaleFactor();
-          const dy = Math.round(dyLogical * scale);
-          await win.setPosition(new PhysicalPosition(pos.x, pos.y - dy));
-        }
-        await win.setSize(new LogicalSize(WIN_W, H_EXPANDED));
-      } else {
-        await win.setSize(new LogicalSize(WIN_W, H_COLLAPSED));
-        if (bottomCorner) {
-          const pos = await win.outerPosition();
-          const scale = await win.scaleFactor();
-          const dy = Math.round(dyLogical * scale);
-          await win.setPosition(new PhysicalPosition(pos.x, pos.y + dy));
-        }
-      }
+      await collapseWindowForPanel(getCurrentWindow(), side);
+      setPanelSide(defaultPanelSideFromCorner(corner));
+      setPillAnchorEnd(false);
     };
 
     void run().catch(() => {});
-  }, [pillPanelHovered, primary?.id, corner]);
+  }, [pillPanelHovered, panelLayoutReady, panelSide, corner]);
 
   const tint =
     primary?.status === "errored"
@@ -124,8 +154,7 @@ export default function CompactView() {
         tint
       )}
       onMouseEnter={() => {
-        cancelScheduledHoverLeave();
-        setPillPanelHovered(true);
+        void openHoverPanel();
       }}
       onMouseLeave={() => {
         scheduleHoverLeaveClear();
@@ -145,7 +174,7 @@ export default function CompactView() {
               initial={{ opacity: 0, y: 2 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -2 }}
-              transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+              transition={MOTION_FAST}
               className="min-w-0"
             >
               <PrimaryLine
@@ -159,7 +188,7 @@ export default function CompactView() {
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              transition={{ duration: 0.22 }}
+              transition={MOTION_FAST}
             >
               {hooksConnected ? (
                 <span className="text-label text-white/35">
@@ -184,22 +213,36 @@ export default function CompactView() {
     </div>
   );
 
+  /** Fixed slot matching collapsed window height — anchors above-panel without shifting the 36px pill. */
+  const pillContent = anchorPillToBottom ? (
+    <div
+      className="flex w-full shrink-0 flex-col justify-start"
+      style={{ height: H_COLLAPSED }}
+    >
+      {pillRow}
+    </div>
+  ) : (
+    pillRow
+  );
+
   return (
     <div
       className={clsx(
         "flex h-full w-full min-h-0 flex-col",
-        bottom ? "justify-end" : "justify-start"
+        anchorPillToBottom ? "justify-end" : "justify-start"
       )}
     >
-      {bottom ? (
+      {panelAbove && showPanel ? (
         <>
-          <HoverPanel session={panelSession} corner={corner} />
-          {pillRow}
+          <HoverPanel session={panelSession} panelSide={panelSide} />
+          {pillContent}
         </>
       ) : (
         <>
-          {pillRow}
-          <HoverPanel session={panelSession} corner={corner} />
+          {pillContent}
+          {showPanel ? (
+            <HoverPanel session={panelSession} panelSide={panelSide} />
+          ) : null}
         </>
       )}
     </div>
