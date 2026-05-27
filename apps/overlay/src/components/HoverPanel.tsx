@@ -7,7 +7,6 @@ import {
   cancelScheduledHoverLeave,
   scheduleHoverLeaveClear,
 } from "../lib/hoverLeaveDebounce";
-import { truncateProject } from "../lib/truncate";
 import { useSessions } from "../store/sessions";
 
 const appLabel: Record<SessionDTO["app"], string> = {
@@ -198,8 +197,6 @@ function ContextRow({ session }: { session: SessionDTO }) {
   const contextText = prompt
     ? `You asked: ${truncatePrompt(prompt, 72)}`
     : "New session";
-  const project = session.project?.trim() ?? "";
-  const projectShort = project ? truncateProject(project, 22) : "—";
 
   return (
     <div className="flex min-w-0 items-baseline justify-between gap-2">
@@ -209,12 +206,7 @@ function ContextRow({ session }: { session: SessionDTO }) {
       >
         {contextText}
       </p>
-      <span
-        className="flex min-w-0 max-w-[45%] shrink items-baseline gap-0 truncate text-[10px] text-white/28"
-        title={project || undefined}
-      >
-        <span className="truncate text-white/45">{projectShort}</span>
-        <span className="shrink-0 text-white/20"> · </span>
+      <span className="flex shrink-0 items-baseline gap-0 truncate text-[10px] text-white/28">
         <span className="shrink-0">{appLabel[session.app]}</span>
         {session.model ? (
           <>
