@@ -2,9 +2,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
 import type { Corner, SessionDTO } from "../types";
 
-const REMOVAL_DELAY_MS = 7000;
+/** Background cleanup after ack if remove_session fails (user dismiss is immediate). */
+const REMOVAL_DELAY_MS = 500;
 
 const removalTimers = new Map<string, ReturnType<typeof setTimeout>>();
+/** Optimistic dismiss — hide until backend snapshot confirms removal. */
+const dismissedIds = new Set<string>();
 
 function clearRemovalTimer(id: string) {
   const t = removalTimers.get(id);
@@ -23,6 +26,10 @@ function scheduleRemovalAfterAck(id: string) {
   removalTimers.set(id, t);
 }
 
+function filterSessions(sessions: SessionDTO[]): SessionDTO[] {
+  return sessions.filter((s) => !dismissedIds.has(s.id));
+}
+
 interface SessionsState {
   sessions: SessionDTO[];
   corner: Corner;
@@ -38,6 +45,8 @@ interface SessionsState {
   tempSelect: (id: string) => void;
   clearTempSelect: () => void;
   setPillPanelHovered: (v: boolean) => void;
+  /** Dismiss a done session — instant UI, then sync backend. */
+  dismissSession: (id: string) => void;
   primary: () => SessionDTO | undefined;
   doneQueueCount: () => number;
 }
@@ -57,8 +66,15 @@ export const useSessions = create<SessionsState>((set, get) => ({
   setSessions: (next) => {
     const prev = get().sessions;
     const prevTemp = get().tempSelectedId;
+    const nextIds = new Set(next.map((x) => x.id));
 
-    for (const s of next) {
+    for (const id of [...dismissedIds]) {
+      if (!nextIds.has(id)) dismissedIds.delete(id);
+    }
+
+    const filtered = filterSessions(next);
+
+    for (const s of filtered) {
       const was = prev.find((x) => x.id === s.id);
       if (
         s.status === "done" &&
@@ -70,7 +86,6 @@ export const useSessions = create<SessionsState>((set, get) => ({
       }
     }
 
-    const nextIds = new Set(next.map((x) => x.id));
     for (const id of [...removalTimers.keys()]) {
       if (!nextIds.has(id)) {
         clearRemovalTimer(id);
@@ -78,9 +93,11 @@ export const useSessions = create<SessionsState>((set, get) => ({
     }
 
     let tempSelectedId = prevTemp;
-    if (tempSelectedId && !nextIds.has(tempSelectedId)) tempSelectedId = null;
+    if (tempSelectedId && !filtered.some((x) => x.id === tempSelectedId)) {
+      tempSelectedId = null;
+    }
 
-    set({ sessions: next, tempSelectedId });
+    set({ sessions: filtered, tempSelectedId });
   },
 
   tempSelect: (id) => set({ tempSelectedId: id }),
@@ -89,32 +106,52 @@ export const useSessions = create<SessionsState>((set, get) => ({
 
   setPillPanelHovered: (pillPanelHovered) => set({ pillPanelHovered }),
 
+  dismissSession: (id) => {
+    dismissedIds.add(id);
+    clearRemovalTimer(id);
+    const { sessions, tempSelectedId } = get();
+    const remaining = sessions.filter((s) => s.id !== id);
+    set({
+      sessions: remaining,
+      tempSelectedId: tempSelectedId === id ? null : tempSelectedId,
+      pillPanelHovered: false,
+    });
+    invoke("acknowledge_done", { id }).catch(() => {});
+    invoke("remove_session", { id }).catch(() => {});
+  },
+
   primary: () => {
     const { sessions, tempSelectedId } = get();
-    if (sessions.length === 0) return undefined;
+    const visible = filterSessions(sessions);
+
+    if (visible.length === 0) return undefined;
 
     const byId = (id: string | null | undefined) =>
-      id ? sessions.find((x) => x.id === id) : undefined;
-
+      id ? visible.find((x) => x.id === id) : undefined;
     if (tempSelectedId) {
       const t = byId(tempSelectedId);
       if (t) return t;
     }
 
-    const erroreds = sessions.filter((x) => x.status === "errored");
+    const erroreds = visible.filter((x) => x.status === "errored");
     if (erroreds.length) {
       return [...erroreds].sort((a, b) => b.lastEventAtMs - a.lastEventAtMs)[0];
     }
-    const dones = sessions.filter(
+    const dones = visible.filter(
       (x) => x.status === "done" && !x.acknowledgedDone
     );
     if (dones.length) {
       return [...dones].sort((a, b) => b.lastEventAtMs - a.lastEventAtMs)[0];
     }
-    return [...sessions].sort((a, b) => b.lastEventAtMs - a.lastEventAtMs)[0];
+    const active = visible.filter(
+      (x) => !(x.status === "done" && x.acknowledgedDone)
+    );
+    if (active.length === 0) return undefined;
+    return [...active].sort((a, b) => b.lastEventAtMs - a.lastEventAtMs)[0];
   },
 
   doneQueueCount: () =>
-    get().sessions.filter((x) => x.status === "done" && !x.acknowledgedDone)
-      .length,
+    filterSessions(get().sessions).filter(
+      (x) => x.status === "done" && !x.acknowledgedDone
+    ).length,
 }));
