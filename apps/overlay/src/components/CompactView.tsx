@@ -11,6 +11,7 @@ import {
   scheduleHoverLeaveClear,
   setHoverLeaveGuard,
 } from "../lib/hoverLeaveDebounce";
+import { HOVER_PANEL_EXIT_MS, waitFrames, waitMs } from "../lib/hoverPanelMotion";
 import {
   collapseWindowForPanel,
   defaultPanelSideFromCorner,
@@ -71,7 +72,7 @@ export default function CompactView() {
   const showPanel =
     panelLayoutReady && pillPanelHovered && primary !== undefined;
   const panelSession = showPanel ? primary : null;
-  const panelAbove = showPanel && panelSide === "above";
+  const layoutPanelAbove = slotAtBottom;
   const anchorPillToBottom = slotAtBottom;
 
   useEffect(() => {
@@ -121,6 +122,7 @@ export default function CompactView() {
     }
 
     clearHoverState();
+    await waitMs(HOVER_PANEL_EXIT_MS);
     await collapseWindowForPanel(getCurrentWindow(), side);
 
     flushSync(() => {
@@ -165,8 +167,11 @@ export default function CompactView() {
 
       setPillPanelHovered(true);
       flushSync(() => {
-        setPanelLayoutReady(true);
         setHideDuringNativeResize(false);
+      });
+      await waitFrames(2);
+      flushSync(() => {
+        setPanelLayoutReady(true);
       });
       cancelScheduledHoverLeave();
       markHoverOpenGrace();
@@ -253,6 +258,7 @@ export default function CompactView() {
             clearHoverState();
             setPanelLayoutReady(false);
           }
+          await waitMs(HOVER_PANEL_EXIT_MS);
           await collapseWindowForPanel(getCurrentWindow(), side);
           flushSync(() => {
             resetCollapsedLayout();
@@ -365,7 +371,7 @@ export default function CompactView() {
         hideDuringNativeResize && "invisible"
       )}
     >
-      {panelAbove ? (
+      {layoutPanelAbove ? (
         <>
           <HoverPanel session={panelSession} panelSide={panelSide} />
           {pillContent}
@@ -373,9 +379,7 @@ export default function CompactView() {
       ) : (
         <>
           {pillContent}
-          {showPanel ? (
-            <HoverPanel session={panelSession} panelSide={panelSide} />
-          ) : null}
+          <HoverPanel session={panelSession} panelSide={panelSide} />
         </>
       )}
     </div>
