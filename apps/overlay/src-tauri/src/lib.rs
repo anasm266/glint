@@ -103,19 +103,24 @@ pub fn run() {
 pub(crate) fn reposition_main(window: &tauri::WebviewWindow, corner: state::Corner) {
     let Ok(monitor) = window.current_monitor() else { return };
     let Some(monitor) = monitor else { return };
-    let size = monitor.size();
+    let work = monitor.work_area();
+    let work_pos = work.position;
+    let work_size = work.size;
     let scale = monitor.scale_factor();
     let inset = (24.0 * scale) as i32;
     let win_w = (380.0 * scale) as i32;
     let win_h = (60.0 * scale) as i32;
-    let pos = monitor.position();
     let x = match corner {
-        state::Corner::Tl | state::Corner::Bl => pos.x + inset,
-        state::Corner::Tr | state::Corner::Br => pos.x + size.width as i32 - win_w - inset,
+        state::Corner::Tl | state::Corner::Bl => work_pos.x + inset,
+        state::Corner::Tr | state::Corner::Br => {
+            work_pos.x + work_size.width as i32 - win_w - inset
+        }
     };
     let y = match corner {
-        state::Corner::Tl | state::Corner::Tr => pos.y + inset,
-        state::Corner::Bl | state::Corner::Br => pos.y + size.height as i32 - win_h - inset,
+        state::Corner::Tl | state::Corner::Tr => work_pos.y + inset,
+        state::Corner::Bl | state::Corner::Br => {
+            work_pos.y + work_size.height as i32 - win_h - inset
+        }
     };
     let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
 }
