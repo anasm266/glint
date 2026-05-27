@@ -1,9 +1,5 @@
-import {
-  currentMonitor,
-  LogicalSize,
-  PhysicalPosition,
-  type Window,
-} from "@tauri-apps/api/window";
+import { invoke } from "@tauri-apps/api/core";
+import { currentMonitor, type Window } from "@tauri-apps/api/window";
 import type { Corner, PanelSide } from "../types";
 
 export const H_COLLAPSED = 60;
@@ -13,6 +9,8 @@ export const EDGE_MARGIN = 24;
 
 const WIN_W = 380;
 const PANEL_DY_LOGICAL = H_EXPANDED - H_COLLAPSED;
+/** Collapsed vs expanded height threshold (logical px, with slack for DPI rounding). */
+const EXPANDED_HEIGHT_MIN = H_COLLAPSED + (H_EXPANDED - H_COLLAPSED) * 0.5;
 
 export interface PhysicalRect {
   x: number;
@@ -66,7 +64,7 @@ export async function getPanelSideForWindow(
     if (!monitor) return fallback;
 
     const panelNeed =
-      (H_EXPANDED - H_COLLAPSED) * scale + SHADOW_BUFFER + EDGE_MARGIN;
+      PANEL_DY_LOGICAL * scale + SHADOW_BUFFER + EDGE_MARGIN;
 
     const windowRect: PhysicalRect = {
       x: pos.x,
@@ -88,31 +86,31 @@ export async function getPanelSideForWindow(
   }
 }
 
-async function panelDyPhysical(win: Window): Promise<number> {
-  const scale = await win.scaleFactor();
-  return Math.round(PANEL_DY_LOGICAL * scale);
-}
-
 /** Grow the native window toward `side` before showing the hover panel (keeps pill anchored). */
 export async function expandWindowForPanel(
-  win: Window,
+  _win: Window,
   side: PanelSide
 ): Promise<void> {
-  if (side === "above") {
-    const [pos, dy] = await Promise.all([win.outerPosition(), panelDyPhysical(win)]);
-    await win.setPosition(new PhysicalPosition(pos.x, pos.y - dy));
-  }
-  await win.setSize(new LogicalSize(WIN_W, H_EXPANDED));
+  await invoke("set_panel_window_expanded", { expandUp: side === "above" });
 }
 
 /** Shrink the native window after the hover panel closes. */
 export async function collapseWindowForPanel(
+  _win: Window,
+  side: PanelSide
+): Promise<void> {
+  await invoke("set_panel_window_collapsed", {
+    collapseFromAbove: side === "above",
+  });
+}
+
+/** If a prior collapse failed, normalize to collapsed before measuring or expanding. */
+export async function ensureWindowCollapsed(
   win: Window,
   side: PanelSide
 ): Promise<void> {
-  await win.setSize(new LogicalSize(WIN_W, H_COLLAPSED));
-  if (side === "above") {
-    const [pos, dy] = await Promise.all([win.outerPosition(), panelDyPhysical(win)]);
-    await win.setPosition(new PhysicalPosition(pos.x, pos.y + dy));
+  const [size, scale] = await Promise.all([win.outerSize(), win.scaleFactor()]);
+  if (size.height > EXPANDED_HEIGHT_MIN * scale) {
+    await collapseWindowForPanel(win, side);
   }
 }

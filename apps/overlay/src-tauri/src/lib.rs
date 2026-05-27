@@ -56,6 +56,8 @@ pub fn run() {
             commands::is_cursor_connected,
             commands::get_settings,
             commands::set_position,
+            commands::set_panel_window_expanded,
+            commands::set_panel_window_collapsed,
             commands::set_opacity,
             commands::open_settings,
             commands::quit_app,
