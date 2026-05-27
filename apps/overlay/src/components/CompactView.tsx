@@ -3,13 +3,18 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import clsx from "clsx";
 import { AnimatePresence, motion } from "framer-motion";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import {
   cancelScheduledHoverLeave,
+  clearHoverState,
+  markHoverOpenGrace,
   scheduleHoverLeaveClear,
+  setHoverLeaveGuard,
 } from "../lib/hoverLeaveDebounce";
 import {
   collapseWindowForPanel,
   defaultPanelSideFromCorner,
+  ensureWindowCollapsed,
   expandWindowForPanel,
   getPanelSideForWindow,
   H_COLLAPSED,
@@ -47,22 +52,29 @@ export default function CompactView() {
   const [panelSide, setPanelSide] = useState<PanelSide>(() =>
     defaultPanelSideFromCorner(corner)
   );
-  /** Native window is expanded and it is safe to render the hover panel layout. */
   const [panelLayoutReady, setPanelLayoutReady] = useState(false);
 
   const pillPanelHoveredRef = useRef(pillPanelHovered);
   pillPanelHoveredRef.current = pillPanelHovered;
+  const panelLayoutReadyRef = useRef(panelLayoutReady);
+  panelLayoutReadyRef.current = panelLayoutReady;
   const openingRef = useRef(false);
-
-  /** Keep pill at window bottom while expanding upward (before panel mounts). */
-  const [pillAnchorEnd, setPillAnchorEnd] = useState(false);
+  const draggingRef = useRef(false);
+  const panelSideRef = useRef(panelSide);
+  panelSideRef.current = panelSide;
 
   const showPanel =
     panelLayoutReady && pillPanelHovered && primary !== undefined;
   const panelSession = showPanel ? primary : null;
-  const panelAbove = panelSide === "above";
-  const anchorPillToBottom =
-    panelAbove && (pillAnchorEnd || panelLayoutReady || pillPanelHovered);
+  const panelAbove = panelLayoutReady && panelSide === "above";
+  const anchorPillToBottom = panelAbove;
+
+  useEffect(() => {
+    setHoverLeaveGuard(
+      () => openingRef.current || draggingRef.current
+    );
+    return () => setHoverLeaveGuard(null);
+  }, []);
 
   useEffect(() => {
     if (!pillPanelHoveredRef.current && !panelLayoutReady) {
@@ -70,8 +82,36 @@ export default function CompactView() {
     }
   }, [corner, panelLayoutReady]);
 
+  const endDrag = useCallback(() => {
+    draggingRef.current = false;
+  }, []);
+
+  useEffect(() => {
+    const onPointerUp = () => endDrag();
+    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", onPointerUp);
+    return () => {
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerUp);
+    };
+  }, [endDrag]);
+
+  const collapsePanelWindow = useCallback(async () => {
+    const side = panelSideRef.current;
+    setPanelLayoutReady(false);
+    clearHoverState();
+    await collapseWindowForPanel(getCurrentWindow(), side);
+    setPanelSide(defaultPanelSideFromCorner(corner));
+  }, [corner]);
+
   const openHoverPanel = useCallback(async () => {
-    if (openingRef.current || pillPanelHoveredRef.current) return;
+    if (openingRef.current || draggingRef.current) return;
+    if (
+      pillPanelHoveredRef.current &&
+      panelLayoutReadyRef.current
+    ) {
+      return;
+    }
     if (primary === undefined) return;
 
     cancelScheduledHoverLeave();
@@ -79,16 +119,29 @@ export default function CompactView() {
 
     try {
       const win = getCurrentWindow();
+      await ensureWindowCollapsed(win, panelSideRef.current);
       const fallback = defaultPanelSideFromCorner(corner);
       const side = await getPanelSideForWindow(win, fallback);
-      setPillAnchorEnd(side === "above");
-      setPanelSide(side);
+      panelSideRef.current = side;
       await expandWindowForPanel(win, side);
-      setPanelLayoutReady(true);
       setPillPanelHovered(true);
+      flushSync(() => {
+        setPanelSide(side);
+        setPanelLayoutReady(true);
+      });
+      cancelScheduledHoverLeave();
+      markHoverOpenGrace();
     } catch {
       setPanelLayoutReady(false);
-      setPillAnchorEnd(false);
+      clearHoverState();
+      try {
+        await ensureWindowCollapsed(
+          getCurrentWindow(),
+          panelSideRef.current
+        );
+      } catch {
+        /* ignore */
+      }
     } finally {
       openingRef.current = false;
     }
@@ -121,19 +174,47 @@ export default function CompactView() {
   }, [clearTempSelect, setCorner, setCodexConnected, setCursorConnected]);
 
   useEffect(() => {
-    if (pillPanelHovered || !panelLayoutReady) return;
+    if (
+      openingRef.current ||
+      pillPanelHovered ||
+      !panelLayoutReady ||
+      draggingRef.current
+    ) {
+      return;
+    }
 
-    const side = panelSide;
-    setPanelLayoutReady(false);
+    void collapsePanelWindow().catch(() => {});
+  }, [pillPanelHovered, panelLayoutReady, collapsePanelWindow]);
 
-    const run = async () => {
-      await collapseWindowForPanel(getCurrentWindow(), side);
-      setPanelSide(defaultPanelSideFromCorner(corner));
-      setPillAnchorEnd(false);
-    };
+  const handlePillPointerDown = (e: React.PointerEvent) => {
+    if (e.button !== 0) return;
+    const target = e.target as HTMLElement;
+    if (target.closest("button, [role='button'], a")) return;
 
-    void run().catch(() => {});
-  }, [pillPanelHovered, panelLayoutReady, panelSide, corner]);
+    draggingRef.current = true;
+    cancelScheduledHoverLeave();
+
+    const releaseDrag = () => endDrag();
+
+    void (async () => {
+      try {
+        if (panelLayoutReadyRef.current) {
+          clearHoverState();
+          setPanelLayoutReady(false);
+          await collapseWindowForPanel(
+            getCurrentWindow(),
+            panelSideRef.current
+          );
+          setPanelSide(defaultPanelSideFromCorner(corner));
+        }
+        await getCurrentWindow().startDragging();
+      } catch {
+        /* ignore */
+      } finally {
+        releaseDrag();
+      }
+    })();
+  };
 
   const tint =
     primary?.status === "errored"
@@ -148,7 +229,6 @@ export default function CompactView() {
 
   const pillRow = (
     <div
-      data-tauri-drag-region
       className={clsx(
         "surface flex h-9 w-full shrink-0 items-center gap-3 px-3 transition-colors duration-220 ease-out cursor-default select-none",
         tint
@@ -159,6 +239,7 @@ export default function CompactView() {
       onMouseLeave={() => {
         scheduleHoverLeaveClear();
       }}
+      onPointerDown={handlePillPointerDown}
       onClick={onPillClick}
     >
       <FleetBar
