@@ -91,7 +91,8 @@ impl PendingStop {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
             error_message: p
-                .get("error_message")
+                .get("error")
+                .or_else(|| p.get("error_message"))
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
         }
@@ -358,6 +359,7 @@ fn normalize_hook_event(name: &str) -> String {
         "afterFileEdit" | "AfterFileEdit" => "AfterFileEdit".to_string(),
         "subagentStart" | "SubagentStart" => "SubagentStart".to_string(),
         "subagentStop" | "SubagentStop" => "SubagentStop".to_string(),
+        "stopFailure" | "StopFailure" => "StopFailure".to_string(),
         other => other.to_string(),
     }
 }
@@ -574,9 +576,26 @@ fn resolve_cwd(p: &serde_json::Value) -> String {
         .to_string()
 }
 
+fn is_claude_payload(p: &serde_json::Value) -> bool {
+    if let Some(path) = p.get("transcript_path").and_then(|v| v.as_str()) {
+        let lower = path.replace('\\', "/").to_lowercase();
+        if lower.contains("/.claude/") || lower.contains("\\.claude\\") {
+            return true;
+        }
+    }
+    if let Some(cwd) = p.get("cwd").and_then(|v| v.as_str()) {
+        if cwd.replace('\\', "/").contains("/.claude/") {
+            return true;
+        }
+    }
+    false
+}
+
 fn detect_app(p: &serde_json::Value) -> App {
     if p.get("conversation_id").and_then(|v| v.as_str()).is_some() {
         App::Cursor
+    } else if is_claude_payload(p) {
+        App::Claude
     } else {
         App::Codex
     }
@@ -918,6 +937,24 @@ pub fn apply(
             }
             entry.flatten_files();
         }
+        "StopFailure" => {
+            let flush_tid = entry.turn_activity_turn_id.clone();
+            entry.flush_turn_activity(raw.ts, flush_tid.as_str());
+            entry.turn_finished = true;
+            entry.pending_stop = None;
+            entry.active_subagent_count = 0;
+            entry.active_child_conversations.clear();
+            entry.status = Status::Errored;
+            let msg = p
+                .get("error")
+                .or_else(|| p.get("error_message"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("Error");
+            entry.done_summary = Some(truncate(msg, 200));
+            entry.current_action = entry.done_summary.clone().unwrap_or_default();
+            entry.flatten_files();
+        }
         "AfterFileEdit" => {
             apply_after_file_edit(entry, p, raw.ts);
         }
@@ -1071,7 +1108,7 @@ fn describe_pre_tool(p: &serde_json::Value) -> String {
                 "Reading file".to_string()
             }
         }
-        "Write" => {
+        "Write" | "Edit" => {
             if let Some(path) = path_from_tool_input(input) {
                 format!("Editing: {}", truncate(&basename(&path), 56))
             } else {
@@ -1098,11 +1135,54 @@ fn describe_pre_tool(p: &serde_json::Value) -> String {
     }
 }
 
+fn track_claude_edit_post(s: &mut Session, p: &serde_json::Value) {
+    let path = p
+        .get("file_path")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| path_from_tool_input(p.get("tool_input")))
+        .filter(|s| !s.is_empty());
+    let Some(path) = path else {
+        return;
+    };
+    let mut adds = 0u32;
+    let mut dels = 0u32;
+    if let Some(input) = p.get("tool_input") {
+        if let Some(old) = input.get("old_string").and_then(|v| v.as_str()) {
+            dels += old.lines().count() as u32;
+        }
+        if let Some(new) = input.get("new_string").and_then(|v| v.as_str()) {
+            adds += new.lines().count() as u32;
+        }
+        if let Some(edits) = input.get("edits").and_then(|v| v.as_array()) {
+            for edit in edits {
+                if let Some(old) = edit.get("old_string").and_then(|v| v.as_str()) {
+                    dels += old.lines().count() as u32;
+                }
+                if let Some(new) = edit.get("new_string").and_then(|v| v.as_str()) {
+                    adds += new.lines().count() as u32;
+                }
+            }
+        }
+    }
+    if adds == 0 && dels == 0 {
+        adds = 1;
+    }
+    let stat = s.files_edited_map.entry(path.to_string()).or_default();
+    stat.adds = stat.adds.saturating_add(adds);
+    stat.dels = stat.dels.saturating_add(dels);
+    s.flatten_files();
+}
+
 fn track_files_from_post(s: &mut Session, p: &serde_json::Value) {
     let tool = p
         .get("tool_name")
         .and_then(|v| v.as_str())
         .unwrap_or("");
+    if tool == "Edit" {
+        track_claude_edit_post(s, p);
+        return;
+    }
     if tool != "apply_patch" && tool != "Write" {
         return;
     }
@@ -1112,6 +1192,9 @@ fn track_files_from_post(s: &mut Session, p: &serde_json::Value) {
         .and_then(|v| v.as_str())
         .unwrap_or("");
     if patch.is_empty() {
+        if tool == "Write" {
+            track_claude_edit_post(s, p);
+        }
         return;
     }
     // Lightweight parser: walks `*** Update File: <path>` blocks and counts
@@ -2408,11 +2491,84 @@ mod tests {
     }
 
     #[test]
-    fn detect_app_cursor_vs_codex() {
+    fn detect_app_cursor_vs_codex_vs_claude() {
         let cursor = serde_json::json!({ "conversation_id": "c1", "session_id": "s1" });
         let codex = serde_json::json!({ "session_id": "s1" });
+        let claude = serde_json::json!({
+            "session_id": "s1",
+            "transcript_path": "C:/Users/me/.claude/projects/foo/session.jsonl"
+        });
         assert_eq!(detect_app(&cursor), App::Cursor);
         assert_eq!(detect_app(&codex), App::Codex);
+        assert_eq!(detect_app(&claude), App::Claude);
+    }
+
+    #[test]
+    fn stop_failure_marks_errored() {
+        let mut map = HashMap::new();
+        let mut routing = SessionRouting::default();
+        let raw = RawEvent {
+            event: "StopFailure".to_string(),
+            payload: serde_json::json!({
+                "session_id": "claude-1",
+                "transcript_path": "C:/Users/me/.claude/projects/foo/session.jsonl",
+                "error": "Rate limit exceeded"
+            }),
+            ts: 200,
+            hook_pid: None,
+            parent_pid: None,
+        };
+        apply(&mut map, &mut routing, raw);
+        let s = map.get("claude-1").unwrap();
+        assert_eq!(s.app, App::Claude);
+        assert_eq!(s.status, Status::Errored);
+        assert_eq!(s.current_action, "Rate limit exceeded");
+    }
+
+    #[test]
+    fn claude_post_edit_tracks_files() {
+        let mut map = HashMap::new();
+        let mut routing = SessionRouting::default();
+        apply(
+            &mut map,
+            &mut routing,
+            RawEvent {
+                event: "SessionStart".to_string(),
+                payload: serde_json::json!({
+                    "session_id": "c1",
+                    "transcript_path": "C:/Users/me/.claude/projects/foo/session.jsonl",
+                    "model": "claude-sonnet-4"
+                }),
+                ts: 1,
+                hook_pid: None,
+                parent_pid: None,
+            },
+        );
+        apply(
+            &mut map,
+            &mut routing,
+            RawEvent {
+                event: "PostToolUse".to_string(),
+                payload: serde_json::json!({
+                    "session_id": "c1",
+                    "transcript_path": "C:/Users/me/.claude/projects/foo/session.jsonl",
+                    "tool_name": "Edit",
+                    "tool_input": {
+                        "file_path": "src/main.rs",
+                        "old_string": "a\nb\n",
+                        "new_string": "a\nb\nc\n"
+                    }
+                }),
+                ts: 2,
+                hook_pid: None,
+                parent_pid: None,
+            },
+        );
+        let s = map.get("c1").unwrap();
+        assert_eq!(s.app, App::Claude);
+        assert_eq!(s.model, "claude-sonnet-4");
+        assert_eq!(s.files_edited.len(), 1);
+        assert_eq!(s.files_edited[0].0, "src/main.rs");
     }
 
     #[test]
