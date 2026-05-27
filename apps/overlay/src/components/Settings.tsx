@@ -54,6 +54,24 @@ export default function Settings() {
     }
   };
 
+  const setClaudeConnected = async (next: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      if (next) {
+        await invoke("install_claude_hooks");
+      } else {
+        await invoke("remove_claude_hooks");
+      }
+      const fresh = await invoke<SettingsDTO>("get_settings");
+      setS(fresh);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const setCorner = async (corner: Corner) => {
     await invoke("set_position", { corner });
     setS({ ...s, corner });
@@ -113,6 +131,29 @@ export default function Settings() {
             value={s.cursorConnected}
             disabled={busy}
             onChange={setCursorConnected}
+          />
+        </div>
+      </section>
+
+      <section className="flex flex-col gap-2">
+        <div className="flex items-center justify-between gap-4">
+          <div className="min-w-0">
+            <div className="text-value flex items-center gap-2">
+              Connect Claude
+              {s.claudeConnected ? (
+                <span className="text-[10px] text-emerald-300/85 px-1.5 py-0.5 rounded bg-emerald-400/10 border border-emerald-400/20">
+                  connected
+                </span>
+              ) : null}
+            </div>
+            <div className="text-[11px] text-white/45 mt-0.5">
+              Writes hook entries into ~/.claude/settings.json. Restart Claude Code after enabling.
+            </div>
+          </div>
+          <Switch
+            value={s.claudeConnected}
+            disabled={busy}
+            onChange={setClaudeConnected}
           />
         </div>
       </section>
