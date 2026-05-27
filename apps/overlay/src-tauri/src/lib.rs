@@ -3,6 +3,7 @@
 //! The bin (`main.rs`) is a thin shim that calls [`run`]. All Tauri
 //! configuration lives here.
 
+mod claude_hook_install;
 mod commands;
 mod cursor_hook_install;
 mod file_log;
