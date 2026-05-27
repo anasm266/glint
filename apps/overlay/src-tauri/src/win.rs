@@ -87,6 +87,44 @@ pub fn focus_cursor(pid: u32) -> bool {
 }
 
 #[cfg(windows)]
+pub fn root_claude_pid(pid: u32) -> Option<u32> {
+    let candidates = [
+        "claude.exe",
+        "Claude.exe",
+        "Claude Code.exe",
+        "claude-code.exe",
+    ];
+    let map = process_map()?;
+
+    let mut current = pid;
+    for _ in 0..16 {
+        let entry = map.iter().find(|e| e.pid == current)?;
+        if candidates
+            .iter()
+            .any(|c| entry.name.eq_ignore_ascii_case(c))
+        {
+            return Some(entry.pid);
+        }
+        current = entry.parent_pid;
+        if current == 0 {
+            break;
+        }
+    }
+
+    map.iter()
+        .find(|e| {
+            let n = e.name.to_lowercase();
+            n.contains("claude") && !n.contains("cursor")
+        })
+        .map(|e| e.pid)
+}
+
+#[cfg(windows)]
+pub fn focus_claude(pid: u32) -> bool {
+    focus_window_for_pid(pid, "Claude")
+}
+
+#[cfg(windows)]
 fn focus_window_for_pid(pid: u32, title_fragment: &str) -> bool {
     let hwnd = find_top_window_for_pid(pid)
         .or_else(|| find_window_by_title_fragment(title_fragment));
@@ -219,5 +257,15 @@ pub fn focus_pid(_pid: u32) -> bool {
 
 #[cfg(not(windows))]
 pub fn focus_cursor(_pid: u32) -> bool {
+    false
+}
+
+#[cfg(not(windows))]
+pub fn root_claude_pid(_pid: u32) -> Option<u32> {
+    None
+}
+
+#[cfg(not(windows))]
+pub fn focus_claude(_pid: u32) -> bool {
     false
 }
