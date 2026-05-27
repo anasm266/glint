@@ -117,6 +117,6 @@ Replace the placeholder generated icon with a deliberate mark once the product n
 
 ## Out of scope for this document
 
-- **Claude Code** hook integration (planned; same hook relay pattern).
+- **Claude Code** hook integration — **done** (user-level `~/.claude/settings.json`, same `overlay-hook.exe` relay).
 - **Project-level** `.cursor/hooks.json` (user-level only today).
 - Installer / auto-update / code signing (shipping milestone).
