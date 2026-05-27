@@ -589,6 +589,10 @@ fn turn_id_from_payload(p: &serde_json::Value) -> &str {
         .unwrap_or("")
 }
 
+pub(crate) fn tool_response_str_pub(p: &serde_json::Value) -> String {
+    tool_response_str(p)
+}
+
 fn tool_response_str(p: &serde_json::Value) -> String {
     let raw = p
         .get("tool_response")
@@ -1033,6 +1037,11 @@ fn apply_session_end(entry: &mut Session, p: &serde_json::Value) {
             }
         }
     }
+}
+
+/// Human label derived from a hook payload (same logic as the pill for PreToolUse).
+pub(crate) fn describe_pre_tool_pub(p: &serde_json::Value) -> String {
+    describe_pre_tool(p)
 }
 
 fn describe_pre_tool(p: &serde_json::Value) -> String {

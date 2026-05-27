@@ -116,35 +116,44 @@ npm run app:build
 
 The release build embeds the Vite UI; no `localhost:5173` process is required. Rebuild with `npm run app:build` after code changes.
 
-## Debug logs (`GLINT_LOG`)
+## Session logs (always on)
 
-Optional JSONL logs for comparing runs (raw hook input + overlay state after each event).
-
-**Enable** — set before starting the overlay (User or System environment variable, or one-shot in PowerShell):
-
-```powershell
-$env:GLINT_LOG = "1"
-& "C:\path\to\overlay-app\apps\overlay\src-tauri\target\release\overlay-app.exe"
-```
-
-Any non-empty value works except `0` / `false`. When enabled, startup logs the exact file path in the console (`tracing` info line).
-
-**Log directory**
+Every overlay launch writes a JSONL trace under:
 
 - Windows: `%LOCALAPPDATA%\Glint\logs\` (e.g. `C:\Users\<you>\AppData\Local\Glint\logs\`)
 - macOS/Linux fallback: `~/.glint/logs/`
 
-**Per-run file:** `glint-<run_id>.jsonl` where `run_id` is the process start time in ms (one file per overlay launch).
+**Per-run file:** `glint-<run_id>.jsonl` (one file per time you start the app).
 
-**Line types (JSONL)**
+On startup the console prints the exact path: `Glint session logs: …`
 
-| `type` | When | Contents |
-|--------|------|----------|
+**Disable** (optional): `$env:GLINT_LOG = "0"` before launch.
+
+**What each line type records**
+
+| `type` | When | Use for |
+|--------|------|---------|
 | `run_start` | App launch | version, exe path, log file path |
-| `hook_event` | Each `POST /event` | `event`, `conversation_id`, `session_id`, `rollup_parent`, `status`, `current_action`, full `payload` |
-| `snapshot` | After state changes | `sessions[]` with id, app, project, status, `currentAction`, `acknowledgedDone` (what the UI received) |
+| `hook_event` | Every hook POST | **Compare AI vs UI** — see below |
+| `snapshot` | After UI update | Full pill/hover state sent to the frontend |
 
-Logging uses a background thread with append-only writes so hook handling stays within the 200 ms budget.
+**`hook_event` fields (AI vs what you see)**
+
+| Field | Meaning |
+|-------|---------|
+| `ai.tool` | Raw tool invocation — e.g. Shell `command`, Read `path`, Task `description` |
+| `ai.label_from_hook` | Label overlay *derives* from that hook (same rules as the pill) |
+| `ui_shown.pill` | **Exact pill text** after this event |
+| `ui_shown.status` | `working` / `done` / … |
+| `ui_shown.hover_top_activity` | Top line in the hover activity feed |
+| `pill_matches_ai_label` | `false` when pill text ≠ derived label (refinement signal) |
+| `payload` | Full hook JSON from Cursor/Codex |
+
+**`snapshot` fields**
+
+Each session includes `currentAction`, `status`, and the last 5 `recentActivity` lines (what the hover panel shows).
+
+Logging uses a background thread so hooks stay within the 200 ms budget.
 
 ## Build (release)
 
