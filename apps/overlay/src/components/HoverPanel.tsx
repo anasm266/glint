@@ -366,12 +366,21 @@ function ActionStrip({ session, now }: { session: SessionDTO; now: number }) {
 
   const openAgent = (e: React.MouseEvent) => {
     e.stopPropagation();
-    const cmd = session.app === "cursor" ? "open_cursor" : "open_codex";
+    const cmd =
+      session.app === "cursor"
+        ? "open_cursor"
+        : session.app === "claude"
+          ? "open_claude"
+          : "open_codex";
     invoke(cmd, { id: session.id }).catch(() => {});
   };
 
   const openAgentLabel =
-    session.app === "cursor" ? "Open Cursor" : "Open Codex";
+    session.app === "cursor"
+      ? "Open Cursor"
+      : session.app === "claude"
+        ? "Open Claude"
+        : "Open Codex";
 
   const dismissSession = useSessions((s) => s.dismissSession);
 

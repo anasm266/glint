@@ -45,4 +45,5 @@ export interface SettingsDTO {
   opacity: number;
   codexConnected: boolean;
   cursorConnected: boolean;
+  claudeConnected: boolean;
 }

@@ -36,13 +36,15 @@ export default function CompactView() {
   const corner = useSessions((s) => s.corner);
   const codexConnected = useSessions((s) => s.codexConnected);
   const cursorConnected = useSessions((s) => s.cursorConnected);
-  const hooksConnected = codexConnected || cursorConnected;
+  const claudeConnected = useSessions((s) => s.claudeConnected);
+  const hooksConnected = codexConnected || cursorConnected || claudeConnected;
   const pillPanelHovered = useSessions((s) => s.pillPanelHovered);
   const setPillPanelHovered = useSessions((s) => s.setPillPanelHovered);
   const clearTempSelect = useSessions((s) => s.clearTempSelect);
   const setCorner = useSessions((s) => s.setCorner);
   const setCodexConnected = useSessions((s) => s.setCodexConnected);
   const setCursorConnected = useSessions((s) => s.setCursorConnected);
+  const setClaudeConnected = useSessions((s) => s.setClaudeConnected);
 
   const primary = useSessions((s) => s.primary());
   const doneQueueCount = useSessions(
@@ -207,6 +209,7 @@ export default function CompactView() {
             setCorner(settings.corner);
             setCodexConnected(settings.codexConnected);
             setCursorConnected(settings.cursorConnected);
+            setClaudeConnected(settings.claudeConnected);
           } catch {
             /* ignore */
           }
@@ -219,7 +222,7 @@ export default function CompactView() {
     return () => {
       unlisten?.();
     };
-  }, [clearTempSelect, setCorner, setCodexConnected, setCursorConnected]);
+  }, [clearTempSelect, setCorner, setCodexConnected, setCursorConnected, setClaudeConnected]);
 
   useEffect(() => {
     if (
