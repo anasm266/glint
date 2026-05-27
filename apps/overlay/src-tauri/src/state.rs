@@ -219,7 +219,9 @@ impl AppState {
 
     pub fn emit_snapshot(&self, app: &AppHandle) {
         let snap = self.snapshot();
-        file_log::log_snapshot(&snap);
+        if file_log::enabled() {
+            file_log::log_snapshot(&snap);
+        }
         let _ = app.emit("sessions:update", &snap);
     }
 

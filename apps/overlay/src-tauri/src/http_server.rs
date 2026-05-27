@@ -73,9 +73,7 @@ async fn event(
     let raw_for_log = raw.clone();
     let touched = ctx.state.with_session_state(|map, routing| {
         let touched = session::apply(map, routing, raw);
-        if file_log::enabled() {
-            file_log::log_hook_event(&raw_for_log, routing, &touched, map);
-        }
+        file_log::log_hook_event(&raw_for_log, routing, &touched, map);
         touched
     });
     if touched.is_some() {
