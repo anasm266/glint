@@ -15,6 +15,7 @@ import {
   collapseWindowForPanel,
   defaultPanelSideFromCorner,
   ensureWindowCollapsed,
+  ensureWindowCollapsedForMeasure,
   expandWindowForPanel,
   getPanelSideForWindow,
   H_COLLAPSED,
@@ -53,6 +54,10 @@ export default function CompactView() {
     defaultPanelSideFromCorner(corner)
   );
   const [panelLayoutReady, setPanelLayoutReady] = useState(false);
+  /** Pill slot pinned to window bottom before/during above-panel native resize. */
+  const [slotAtBottom, setSlotAtBottom] = useState(false);
+  /** Hide webview during above-panel native resize (avoids one-frame layout mismatch). */
+  const [hideDuringNativeResize, setHideDuringNativeResize] = useState(false);
 
   const pillPanelHoveredRef = useRef(pillPanelHovered);
   pillPanelHoveredRef.current = pillPanelHovered;
@@ -66,8 +71,8 @@ export default function CompactView() {
   const showPanel =
     panelLayoutReady && pillPanelHovered && primary !== undefined;
   const panelSession = showPanel ? primary : null;
-  const panelAbove = panelLayoutReady && panelSide === "above";
-  const anchorPillToBottom = panelAbove;
+  const panelAbove = showPanel && panelSide === "above";
+  const anchorPillToBottom = slotAtBottom;
 
   useEffect(() => {
     setHoverLeaveGuard(
@@ -79,6 +84,7 @@ export default function CompactView() {
   useEffect(() => {
     if (!pillPanelHoveredRef.current && !panelLayoutReady) {
       setPanelSide(defaultPanelSideFromCorner(corner));
+      setSlotAtBottom(false);
     }
   }, [corner, panelLayoutReady]);
 
@@ -96,13 +102,32 @@ export default function CompactView() {
     };
   }, [endDrag]);
 
-  const collapsePanelWindow = useCallback(async () => {
-    const side = panelSideRef.current;
-    setPanelLayoutReady(false);
-    clearHoverState();
-    await collapseWindowForPanel(getCurrentWindow(), side);
+  const resetCollapsedLayout = useCallback(() => {
+    setSlotAtBottom(false);
     setPanelSide(defaultPanelSideFromCorner(corner));
   }, [corner]);
+
+  const collapsePanelWindow = useCallback(async () => {
+    const side = panelSideRef.current;
+    const fromAbove = side === "above";
+
+    if (fromAbove) {
+      flushSync(() => {
+        setPanelLayoutReady(false);
+        setHideDuringNativeResize(true);
+      });
+    } else {
+      setPanelLayoutReady(false);
+    }
+
+    clearHoverState();
+    await collapseWindowForPanel(getCurrentWindow(), side);
+
+    flushSync(() => {
+      resetCollapsedLayout();
+      setHideDuringNativeResize(false);
+    });
+  }, [resetCollapsedLayout]);
 
   const openHoverPanel = useCallback(async () => {
     if (openingRef.current || draggingRef.current) return;
@@ -119,21 +144,39 @@ export default function CompactView() {
 
     try {
       const win = getCurrentWindow();
-      await ensureWindowCollapsed(win, panelSideRef.current);
+      flushSync(() => {
+        setSlotAtBottom(false);
+      });
+      await ensureWindowCollapsedForMeasure(win, panelSideRef.current);
       const fallback = defaultPanelSideFromCorner(corner);
       const side = await getPanelSideForWindow(win, fallback);
       panelSideRef.current = side;
-      await expandWindowForPanel(win, side);
-      setPillPanelHovered(true);
+
+      // DOM layout must match final geometry before the native window resizes.
       flushSync(() => {
         setPanelSide(side);
+        setSlotAtBottom(side === "above");
+        if (side === "above") {
+          setHideDuringNativeResize(true);
+        }
+      });
+
+      await expandWindowForPanel(win, side);
+
+      setPillPanelHovered(true);
+      flushSync(() => {
         setPanelLayoutReady(true);
+        setHideDuringNativeResize(false);
       });
       cancelScheduledHoverLeave();
       markHoverOpenGrace();
     } catch {
       setPanelLayoutReady(false);
       clearHoverState();
+      flushSync(() => {
+        resetCollapsedLayout();
+        setHideDuringNativeResize(false);
+      });
       try {
         await ensureWindowCollapsed(
           getCurrentWindow(),
@@ -145,7 +188,7 @@ export default function CompactView() {
     } finally {
       openingRef.current = false;
     }
-  }, [corner, primary, setPillPanelHovered]);
+  }, [corner, primary, resetCollapsedLayout, setPillPanelHovered]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -199,13 +242,22 @@ export default function CompactView() {
     void (async () => {
       try {
         if (panelLayoutReadyRef.current) {
-          clearHoverState();
-          setPanelLayoutReady(false);
-          await collapseWindowForPanel(
-            getCurrentWindow(),
-            panelSideRef.current
-          );
-          setPanelSide(defaultPanelSideFromCorner(corner));
+          const side = panelSideRef.current;
+          if (side === "above") {
+            flushSync(() => {
+              clearHoverState();
+              setPanelLayoutReady(false);
+              setHideDuringNativeResize(true);
+            });
+          } else {
+            clearHoverState();
+            setPanelLayoutReady(false);
+          }
+          await collapseWindowForPanel(getCurrentWindow(), side);
+          flushSync(() => {
+            resetCollapsedLayout();
+            setHideDuringNativeResize(false);
+          });
         }
         await getCurrentWindow().startDragging();
       } catch {
@@ -294,7 +346,6 @@ export default function CompactView() {
     </div>
   );
 
-  /** Fixed slot matching collapsed window height — anchors above-panel without shifting the 36px pill. */
   const pillContent = anchorPillToBottom ? (
     <div
       className="flex w-full shrink-0 flex-col justify-start"
@@ -310,10 +361,11 @@ export default function CompactView() {
     <div
       className={clsx(
         "flex h-full w-full min-h-0 flex-col",
-        anchorPillToBottom ? "justify-end" : "justify-start"
+        anchorPillToBottom ? "justify-end" : "justify-start",
+        hideDuringNativeResize && "invisible"
       )}
     >
-      {panelAbove && showPanel ? (
+      {panelAbove ? (
         <>
           <HoverPanel session={panelSession} panelSide={panelSide} />
           {pillContent}

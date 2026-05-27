@@ -5,9 +5,8 @@ import type { Corner, PanelSide } from "../types";
 export const H_COLLAPSED = 60;
 export const H_EXPANDED = 300;
 export const SHADOW_BUFFER = 16;
-export const EDGE_MARGIN = 24;
+export const EDGE_MARGIN = 12;
 
-const WIN_W = 380;
 const PANEL_DY_LOGICAL = H_EXPANDED - H_COLLAPSED;
 /** Collapsed vs expanded height threshold (logical px, with slack for DPI rounding). */
 const EXPANDED_HEIGHT_MIN = H_COLLAPSED + (H_EXPANDED - H_COLLAPSED) * 0.5;
@@ -30,7 +29,14 @@ export function defaultPanelSideFromCorner(corner: Corner): PanelSide {
   return corner === "bl" || corner === "br" ? "above" : "below";
 }
 
-/** Pick panel side from free space above vs below the window within the work area. */
+/** Physical pixels needed below/above the collapsed pill to expand the panel. */
+export function panelNeedPhysical(scale: number): number {
+  return Math.round(
+    PANEL_DY_LOGICAL * scale + (SHADOW_BUFFER + EDGE_MARGIN) * scale
+  );
+}
+
+/** Pick panel side from free space above vs below the pill within the work area. */
 export function resolvePanelSide(
   windowRect: PhysicalRect,
   workArea: WorkAreaRect,
@@ -46,7 +52,8 @@ export function resolvePanelSide(
 
   if (spaceBelow >= panelNeed) return "below";
   if (spaceAbove >= panelNeed) return "above";
-  return spaceAbove >= spaceBelow ? "above" : "below";
+  // Prefer below when both are tight — matches default top-corner UX.
+  return spaceBelow >= spaceAbove ? "below" : "above";
 }
 
 export async function getPanelSideForWindow(
@@ -63,14 +70,19 @@ export async function getPanelSideForWindow(
 
     if (!monitor) return fallback;
 
-    const panelNeed =
-      PANEL_DY_LOGICAL * scale + SHADOW_BUFFER + EDGE_MARGIN;
+    const panelNeed = panelNeedPhysical(scale);
+    const collapsedH = Math.round(H_COLLAPSED * scale);
+    const expandedThreshold = EXPANDED_HEIGHT_MIN * scale;
+
+    // If still expanded, measure as collapsed (pill sits in the 60px slot).
+    const measureHeight =
+      size.height > expandedThreshold ? collapsedH : size.height;
 
     const windowRect: PhysicalRect = {
       x: pos.x,
       y: pos.y,
       width: size.width,
-      height: size.height,
+      height: measureHeight,
     };
 
     const workArea: WorkAreaRect = {
@@ -104,7 +116,34 @@ export async function collapseWindowForPanel(
   });
 }
 
-/** If a prior collapse failed, normalize to collapsed before measuring or expanding. */
+/**
+ * Force the native window back to collapsed height before placement measure.
+ * Tries the last-known expand direction first so a stale above-panel expand
+ * does not top-anchor collapse (which jumps the pill and skews placement).
+ */
+export async function ensureWindowCollapsedForMeasure(
+  win: Window,
+  preferredSide?: PanelSide
+): Promise<void> {
+  const scale = await win.scaleFactor();
+  const threshold = EXPANDED_HEIGHT_MIN * scale;
+
+  let size = await win.outerSize();
+  if (size.height <= threshold) return;
+
+  const firstFromAbove = (preferredSide ?? "above") === "above";
+  await invoke("set_panel_window_collapsed", {
+    collapseFromAbove: firstFromAbove,
+  });
+  size = await win.outerSize();
+  if (size.height <= threshold) return;
+
+  await invoke("set_panel_window_collapsed", {
+    collapseFromAbove: !firstFromAbove,
+  });
+}
+
+/** If a prior collapse failed, normalize to collapsed before expanding. */
 export async function ensureWindowCollapsed(
   win: Window,
   side: PanelSide
