@@ -17,8 +17,57 @@ const appLabel: Record<SessionDTO["app"], string> = {
 };
 
 const easeOut = [0.16, 1, 0.3, 1] as const;
+const panelEase = [0.22, 1, 0.36, 1] as const;
 const MOTION_FAST = { duration: 0.14, ease: easeOut } as const;
-const MOTION_PANEL = { duration: 0.18, ease: easeOut } as const;
+
+function panelTransformOrigin(above: boolean): string {
+  return above ? "bottom center" : "top center";
+}
+
+const panelShellVariants = {
+  hidden: (above: boolean) => ({
+    opacity: 0,
+    y: above ? 14 : -14,
+    scale: 0.96,
+  }),
+  visible: {
+    opacity: 1,
+    y: 0,
+    scale: 1,
+    transition: {
+      duration: 0.38,
+      ease: panelEase,
+    },
+  },
+  exit: (above: boolean) => ({
+    opacity: 0,
+    y: above ? 10 : -10,
+    scale: 0.975,
+    transition: {
+      duration: 0.26,
+      ease: panelEase,
+    },
+  }),
+};
+
+const panelContentVariants = {
+  hidden: {},
+  visible: {
+    transition: {
+      staggerChildren: 0.055,
+      delayChildren: 0.1,
+    },
+  },
+};
+
+const panelSectionVariants = {
+  hidden: { opacity: 0, y: 10 },
+  visible: {
+    opacity: 1,
+    y: 0,
+    transition: { duration: 0.32, ease: panelEase },
+  },
+};
 
 const listContainerVariants = {
   hidden: {},
@@ -79,16 +128,18 @@ export default function HoverPanel({
       )}
       aria-hidden={!session}
     >
-      <AnimatePresence initial={false}>
+      <AnimatePresence mode="wait" initial={false}>
         {session ? (
           <motion.div
             key={session.id}
-            initial={{ opacity: 0, y: panelAbove ? 6 : -6 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: panelAbove ? 6 : -6 }}
-            transition={MOTION_PANEL}
+            custom={panelAbove}
+            variants={panelShellVariants}
+            initial="hidden"
+            animate="visible"
+            exit="exit"
+            style={{ transformOrigin: panelTransformOrigin(panelAbove) }}
             className={clsx(
-              "surface flex flex-col gap-2.5 overflow-hidden rounded-surface px-3 py-3",
+              "surface flex flex-col gap-2.5 overflow-hidden rounded-surface px-3 py-3 will-change-transform",
               panelAbove && "mt-auto"
             )}
             onMouseEnter={() => {
@@ -99,30 +150,42 @@ export default function HoverPanel({
               scheduleHoverLeaveClear();
             }}
           >
-            <ContextRow session={session} />
-
-            <AnimatePresence mode="popLayout" initial={false}>
-              <motion.div
-                key={`${session.id}:${session.status}`}
-                initial={{ opacity: 0, y: 4 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -3 }}
-                transition={MOTION_FAST}
-                className="min-h-0"
-              >
-                {session.status === "working" ? (
-                  <WorkingResult session={session} />
-                ) : session.status === "done" ? (
-                  <DoneResult session={session} />
-                ) : session.status === "errored" ? (
-                  <ErroredResult session={session} />
-                ) : (
-                  <WorkingResult session={session} />
-                )}
+            <motion.div
+              variants={panelContentVariants}
+              initial="hidden"
+              animate="visible"
+              className="flex flex-col gap-2.5"
+            >
+              <motion.div variants={panelSectionVariants}>
+                <ContextRow session={session} />
               </motion.div>
-            </AnimatePresence>
 
-            <ActionStrip session={session} now={now} />
+              <motion.div variants={panelSectionVariants} className="min-h-0">
+                <AnimatePresence mode="popLayout" initial={false}>
+                  <motion.div
+                    key={`${session.id}:${session.status}`}
+                    initial={{ opacity: 0, y: 6 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -4 }}
+                    transition={{ duration: 0.22, ease: panelEase }}
+                  >
+                    {session.status === "working" ? (
+                      <WorkingResult session={session} />
+                    ) : session.status === "done" ? (
+                      <DoneResult session={session} />
+                    ) : session.status === "errored" ? (
+                      <ErroredResult session={session} />
+                    ) : (
+                      <WorkingResult session={session} />
+                    )}
+                  </motion.div>
+                </AnimatePresence>
+              </motion.div>
+
+              <motion.div variants={panelSectionVariants}>
+                <ActionStrip session={session} now={now} />
+              </motion.div>
+            </motion.div>
           </motion.div>
         ) : null}
       </AnimatePresence>
