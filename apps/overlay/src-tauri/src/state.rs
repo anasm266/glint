@@ -153,6 +153,7 @@ pub struct Settings {
     pub opacity: f32,
     pub codex_connected: bool,
     pub cursor_connected: bool,
+    pub claude_connected: bool,
 }
 
 impl Default for Settings {
@@ -162,6 +163,7 @@ impl Default for Settings {
             opacity: 0.85,
             codex_connected: false,
             cursor_connected: false,
+            claude_connected: false,
         }
     }
 }
