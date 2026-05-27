@@ -2,11 +2,12 @@ import clsx from "clsx";
 import { invoke } from "@tauri-apps/api/core";
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useState } from "react";
-import type { ActivityEntryDTO, Corner, SessionDTO } from "../types";
+import type { ActivityEntryDTO, PanelSide, SessionDTO } from "../types";
 import {
   cancelScheduledHoverLeave,
   scheduleHoverLeaveClear,
 } from "../lib/hoverLeaveDebounce";
+import { truncateProject } from "../lib/truncate";
 import { useSessions } from "../store/sessions";
 
 const appLabel: Record<SessionDTO["app"], string> = {
@@ -16,6 +17,8 @@ const appLabel: Record<SessionDTO["app"], string> = {
 };
 
 const easeOut = [0.16, 1, 0.3, 1] as const;
+const MOTION_FAST = { duration: 0.14, ease: easeOut } as const;
+const MOTION_PANEL = { duration: 0.18, ease: easeOut } as const;
 
 const listContainerVariants = {
   hidden: {},
@@ -32,7 +35,7 @@ const listItemVariants = {
   show: {
     opacity: 1,
     x: 0,
-    transition: { duration: 0.16, ease: easeOut },
+    transition: { duration: 0.14, ease: easeOut },
   },
 };
 
@@ -54,12 +57,12 @@ const activityExit = {
 
 export default function HoverPanel({
   session,
-  corner,
+  panelSide,
 }: {
   session: SessionDTO | null;
-  corner: Corner;
+  panelSide: PanelSide;
 }) {
-  const bottom = corner === "bl" || corner === "br";
+  const panelAbove = panelSide === "above";
   const [now, setNow] = useState(() => Date.now());
   const setPillPanelHovered = useSessions((s) => s.setPillPanelHovered);
 
@@ -80,13 +83,13 @@ export default function HoverPanel({
         {session ? (
           <motion.div
             key={session.id}
-            initial={{ opacity: 0, y: bottom ? 10 : -10 }}
+            initial={{ opacity: 0, y: panelAbove ? 6 : -6 }}
             animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: bottom ? 10 : -10 }}
-            transition={{ duration: 0.22, ease: easeOut }}
+            exit={{ opacity: 0, y: panelAbove ? 6 : -6 }}
+            transition={MOTION_PANEL}
             className={clsx(
               "surface flex flex-col gap-2.5 overflow-hidden rounded-surface px-3 py-3",
-              bottom && "mt-auto"
+              panelAbove && "mt-auto"
             )}
             onMouseEnter={() => {
               cancelScheduledHoverLeave();
@@ -103,8 +106,8 @@ export default function HoverPanel({
                 key={`${session.id}:${session.status}`}
                 initial={{ opacity: 0, y: 4 }}
                 animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -4 }}
-                transition={{ duration: 0.2, ease: easeOut }}
+                exit={{ opacity: 0, y: -3 }}
+                transition={MOTION_FAST}
                 className="min-h-0"
               >
                 {session.status === "working" ? (
@@ -132,6 +135,8 @@ function ContextRow({ session }: { session: SessionDTO }) {
   const contextText = prompt
     ? `You asked: ${truncatePrompt(prompt, 72)}`
     : "New session";
+  const project = session.project?.trim() ?? "";
+  const projectShort = project ? truncateProject(project, 22) : "—";
 
   return (
     <div className="flex min-w-0 items-baseline justify-between gap-2">
@@ -141,14 +146,17 @@ function ContextRow({ session }: { session: SessionDTO }) {
       >
         {contextText}
       </p>
-      <span className="shrink-0 text-[10px] text-white/28">
-        <span className="text-white/45">{session.project || "—"}</span>
-        <span className="text-white/20"> · </span>
-        {appLabel[session.app]}
+      <span
+        className="flex min-w-0 max-w-[45%] shrink items-baseline gap-0 truncate text-[10px] text-white/28"
+        title={project || undefined}
+      >
+        <span className="truncate text-white/45">{projectShort}</span>
+        <span className="shrink-0 text-white/20"> · </span>
+        <span className="shrink-0">{appLabel[session.app]}</span>
         {session.model ? (
           <>
-            <span className="text-white/15"> · </span>
-            {session.model}
+            <span className="shrink-0 text-white/15"> · </span>
+            <span className="truncate">{session.model}</span>
           </>
         ) : null}
       </span>
@@ -310,9 +318,11 @@ function ActionStrip({ session, now }: { session: SessionDTO; now: number }) {
   const openAgentLabel =
     session.app === "cursor" ? "Open Cursor" : "Open Codex";
 
+  const dismissSession = useSessions((s) => s.dismissSession);
+
   const dismiss = (e: React.MouseEvent) => {
     e.stopPropagation();
-    invoke("acknowledge_done", { id: session.id }).catch(() => {});
+    dismissSession(session.id);
   };
 
   const primaryBtn =
