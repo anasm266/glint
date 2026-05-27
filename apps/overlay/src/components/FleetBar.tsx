@@ -13,6 +13,9 @@ const dotColor: Record<Status, string> = {
   errored: "bg-dot-err",
 };
 
+const easeOut = [0.16, 1, 0.3, 1] as const;
+const MOTION_FAST = { duration: 0.14, ease: easeOut } as const;
+
 export default function FleetBar({
   sessions,
   primaryId,
@@ -55,10 +58,10 @@ export default function FleetBar({
             layout
             role="button"
             tabIndex={0}
-            initial={{ scale: 0.4, opacity: 0 }}
+            initial={{ scale: 0.5, opacity: 0 }}
             animate={{ scale: 1, opacity: 1 }}
-            exit={{ scale: 0.4, opacity: 0 }}
-            transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+            exit={{ scale: 0.5, opacity: 0 }}
+            transition={MOTION_FAST}
             className={clsx(
               "block h-1.5 w-1.5 rounded-full cursor-default",
               dotColor[s.status],
@@ -83,10 +86,10 @@ export default function FleetBar({
           <motion.span
             key="disconnected"
             layout
-            initial={{ scale: 0.4, opacity: 0 }}
+            initial={{ scale: 0.5, opacity: 0 }}
             animate={{ scale: 1, opacity: 1 }}
-            exit={{ scale: 0.4, opacity: 0 }}
-            transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+            exit={{ scale: 0.5, opacity: 0 }}
+            transition={MOTION_FAST}
             title="Hooks not installed — click to open Settings"
             className={clsx(
               "block h-1.5 w-1.5 shrink-0 rounded-full",
