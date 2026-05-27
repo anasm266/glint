@@ -191,49 +191,87 @@ const PANEL_WIN_W: f64 = 380.0;
 const PANEL_H_COLLAPSED: f64 = 60.0;
 const PANEL_H_EXPANDED: f64 = 300.0;
 
-/// Resize the main overlay for the hover panel. When expanding upward, size and
-/// position are applied back-to-back so the pill does not flash between states.
-#[tauri::command]
-pub fn set_panel_window_expanded(expand_up: bool, app: AppHandle) -> Result<(), String> {
+#[cfg(windows)]
+fn set_main_window_rect(
+    window: &tauri::WebviewWindow,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SetWindowPos, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_NOSENDCHANGING, SWP_NOZORDER,
+    };
+
+    let hwnd = window.hwnd().map_err(err)?;
+    let ok = unsafe {
+        SetWindowPos(
+            hwnd.0 as HWND,
+            std::ptr::null_mut(),
+            x,
+            y,
+            width as i32,
+            height as i32,
+            SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING | SWP_NOZORDER,
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn set_main_window_rect(
+    window: &tauri::WebviewWindow,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
+    window
+        .set_size(tauri::PhysicalSize::new(width, height))
+        .map_err(err)?;
+    window
+        .set_position(tauri::PhysicalPosition::new(x, y))
+        .map_err(err)
+}
+
+fn set_panel_window_height(
+    anchor_bottom: bool,
+    target_height: f64,
+    app: AppHandle,
+) -> Result<(), String> {
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| "main window missing".to_string())?;
     let scale = window.scale_factor().map_err(err)?;
-    let w = (PANEL_WIN_W * scale) as u32;
-    let h_exp = (PANEL_H_EXPANDED * scale) as u32;
-    window
-        .set_size(tauri::PhysicalSize::new(w, h_exp))
-        .map_err(err)?;
-    if expand_up {
-        let pos = window.outer_position().map_err(err)?;
-        let dy = ((PANEL_H_EXPANDED - PANEL_H_COLLAPSED) * scale) as i32;
-        window
-            .set_position(tauri::PhysicalPosition::new(pos.x, pos.y - dy))
-            .map_err(err)?;
-    }
-    Ok(())
+    let width = (PANEL_WIN_W * scale) as u32;
+    let height = (target_height * scale) as u32;
+    let pos = window.outer_position().map_err(err)?;
+    let y = if anchor_bottom {
+        let size = window.outer_size().map_err(err)?;
+        let bottom = pos.y + size.height as i32;
+        bottom - height as i32
+    } else {
+        pos.y
+    };
+
+    set_main_window_rect(&window, pos.x, y, width, height)
+}
+
+/// Resize the main overlay for the hover panel. Above-panel transitions are
+/// bottom-anchored so the pill stays fixed on screen.
+#[tauri::command]
+pub fn set_panel_window_expanded(expand_up: bool, app: AppHandle) -> Result<(), String> {
+    set_panel_window_height(expand_up, PANEL_H_EXPANDED, app)
 }
 
 /// Collapse the main overlay after the hover panel closes.
 #[tauri::command]
 pub fn set_panel_window_collapsed(collapse_from_above: bool, app: AppHandle) -> Result<(), String> {
-    let window = app
-        .get_webview_window("main")
-        .ok_or_else(|| "main window missing".to_string())?;
-    let scale = window.scale_factor().map_err(err)?;
-    let w = (PANEL_WIN_W * scale) as u32;
-    let h_col = (PANEL_H_COLLAPSED * scale) as u32;
-    if collapse_from_above {
-        let pos = window.outer_position().map_err(err)?;
-        let dy = ((PANEL_H_EXPANDED - PANEL_H_COLLAPSED) * scale) as i32;
-        window
-            .set_position(tauri::PhysicalPosition::new(pos.x, pos.y + dy))
-            .map_err(err)?;
-    }
-    window
-        .set_size(tauri::PhysicalSize::new(w, h_col))
-        .map_err(err)?;
-    Ok(())
+    set_panel_window_height(collapse_from_above, PANEL_H_COLLAPSED, app)
 }
 
 #[tauri::command]
