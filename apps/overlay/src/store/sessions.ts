@@ -47,8 +47,8 @@ interface SessionsState {
   tempSelect: (id: string) => void;
   clearTempSelect: () => void;
   setPillPanelHovered: (v: boolean) => void;
-  /** Dismiss a done session — instant UI, then sync backend. */
-  dismissSession: (id: string) => void;
+  /** Remove a session from the overlay (instant UI, then sync backend). */
+  untrackSession: (id: string) => void;
   primary: () => SessionDTO | undefined;
   doneQueueCount: () => number;
 }
@@ -110,17 +110,23 @@ export const useSessions = create<SessionsState>((set, get) => ({
 
   setPillPanelHovered: (pillPanelHovered) => set({ pillPanelHovered }),
 
-  dismissSession: (id) => {
+  untrackSession: (id) => {
     dismissedIds.add(id);
     clearRemovalTimer(id);
     const { sessions, tempSelectedId } = get();
+    const removed = sessions.find((s) => s.id === id);
     const remaining = sessions.filter((s) => s.id !== id);
     set({
       sessions: remaining,
       tempSelectedId: tempSelectedId === id ? null : tempSelectedId,
       pillPanelHovered: false,
     });
-    invoke("acknowledge_done", { id }).catch(() => {});
+    if (
+      removed?.status === "done" &&
+      !removed.acknowledgedDone
+    ) {
+      invoke("acknowledge_done", { id }).catch(() => {});
+    }
     invoke("remove_session", { id }).catch(() => {});
   },
 

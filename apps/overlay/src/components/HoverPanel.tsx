@@ -363,6 +363,7 @@ function ActionStrip({ session, now }: { session: SessionDTO; now: number }) {
   const isWorking = session.status === "working";
   const isErrored = session.status === "errored";
   const isDoneEmpty = session.status === "done" && !hasFiles;
+  const showUntrack = isWorking;
 
   const openAgent = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -382,17 +383,19 @@ function ActionStrip({ session, now }: { session: SessionDTO; now: number }) {
         ? "Open Claude"
         : "Open Codex";
 
-  const dismissSession = useSessions((s) => s.dismissSession);
+  const untrackSession = useSessions((s) => s.untrackSession);
 
-  const dismiss = (e: React.MouseEvent) => {
+  const removeFromOverlay = (e: React.MouseEvent) => {
     e.stopPropagation();
-    dismissSession(session.id);
+    untrackSession(session.id);
   };
 
   const primaryBtn =
     "rounded-md bg-white/10 px-3 py-1.5 text-[12px] font-medium text-white/90 transition-colors duration-150 ease-out hover:bg-white/15";
   const ghostBtn =
     "rounded-md px-3 py-1.5 text-[12px] text-white/50 transition-colors duration-150 ease-out hover:bg-white/[0.06] hover:text-white/80";
+  const untrackBtn =
+    "rounded px-2 py-1 text-[11px] text-white/35 transition-colors duration-150 ease-out hover:bg-white/[0.06] hover:text-white/60";
 
   return (
     <div className="flex items-center justify-between gap-2 border-t border-white/[0.06] pt-2">
@@ -403,6 +406,17 @@ function ActionStrip({ session, now }: { session: SessionDTO; now: number }) {
         {elapsedLabel(session, now)}
       </span>
       <div className="flex items-center gap-1.5">
+        {showUntrack ? (
+          <button
+            type="button"
+            className={untrackBtn}
+            title="Remove this session from the overlay"
+            onClick={removeFromOverlay}
+          >
+            Untrack
+          </button>
+        ) : null}
+
         {isWorking ? (
           <button type="button" className={ghostBtn} onClick={openAgent}>
             {openAgentLabel}
@@ -412,7 +426,7 @@ function ActionStrip({ session, now }: { session: SessionDTO; now: number }) {
         {session.status === "done" && hasFiles ? (
           <>
             {showDismiss ? (
-              <button type="button" className={ghostBtn} onClick={dismiss}>
+              <button type="button" className={ghostBtn} onClick={removeFromOverlay}>
                 Dismiss
               </button>
             ) : null}
@@ -428,7 +442,7 @@ function ActionStrip({ session, now }: { session: SessionDTO; now: number }) {
               {openAgentLabel}
             </button>
             {showDismiss ? (
-              <button type="button" className={primaryBtn} onClick={dismiss}>
+              <button type="button" className={primaryBtn} onClick={removeFromOverlay}>
                 Dismiss
               </button>
             ) : null}
