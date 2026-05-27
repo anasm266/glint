@@ -242,34 +242,34 @@ export default function CompactView() {
     draggingRef.current = true;
     cancelScheduledHoverLeave();
 
-    const releaseDrag = () => endDrag();
+    const win = getCurrentWindow();
+    const side = panelSideRef.current;
+    const hadOpenPanel = panelLayoutReadyRef.current;
 
+    if (hadOpenPanel) {
+      clearHoverState();
+      setPanelLayoutReady(false);
+    }
+
+    // startDragging must run immediately — any await before it breaks the grab.
     void (async () => {
       try {
-        if (panelLayoutReadyRef.current) {
-          const side = panelSideRef.current;
-          if (side === "above") {
-            flushSync(() => {
-              clearHoverState();
-              setPanelLayoutReady(false);
-              setHideDuringNativeResize(true);
-            });
-          } else {
-            clearHoverState();
-            setPanelLayoutReady(false);
-          }
-          await waitMs(HOVER_PANEL_EXIT_MS);
-          await collapseWindowForPanel(getCurrentWindow(), side);
-          flushSync(() => {
-            resetCollapsedLayout();
-            setHideDuringNativeResize(false);
-          });
-        }
-        await getCurrentWindow().startDragging();
+        await win.startDragging();
       } catch {
         /* ignore */
       } finally {
-        releaseDrag();
+        if (hadOpenPanel) {
+          try {
+            await collapseWindowForPanel(win, side);
+            flushSync(() => {
+              resetCollapsedLayout();
+              setHideDuringNativeResize(false);
+            });
+          } catch {
+            /* ignore */
+          }
+        }
+        endDrag();
       }
     })();
   };
