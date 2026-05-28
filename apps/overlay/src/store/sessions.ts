@@ -37,8 +37,6 @@ interface SessionsState {
   cursorConnected: boolean;
   claudeConnected: boolean;
   tempSelectedId: string | null;
-  /** True while pointer is over the pill row or hover panel (debounced leave). */
-  pillPanelHovered: boolean;
   setSessions: (s: SessionDTO[]) => void;
   setCorner: (c: Corner) => void;
   setCodexConnected: (v: boolean) => void;
@@ -46,7 +44,6 @@ interface SessionsState {
   setClaudeConnected: (v: boolean) => void;
   tempSelect: (id: string) => void;
   clearTempSelect: () => void;
-  setPillPanelHovered: (v: boolean) => void;
   /** Remove a session from the overlay (instant UI, then sync backend). */
   untrackSession: (id: string) => void;
   primary: () => SessionDTO | undefined;
@@ -60,7 +57,6 @@ export const useSessions = create<SessionsState>((set, get) => ({
   cursorConnected: false,
   claudeConnected: false,
   tempSelectedId: null,
-  pillPanelHovered: false,
 
   setCorner: (corner) => set({ corner }),
   setCodexConnected: (codexConnected) => set({ codexConnected }),
@@ -108,8 +104,6 @@ export const useSessions = create<SessionsState>((set, get) => ({
 
   clearTempSelect: () => set({ tempSelectedId: null }),
 
-  setPillPanelHovered: (pillPanelHovered) => set({ pillPanelHovered }),
-
   untrackSession: (id) => {
     dismissedIds.add(id);
     clearRemovalTimer(id);
@@ -119,7 +113,6 @@ export const useSessions = create<SessionsState>((set, get) => ({
     set({
       sessions: remaining,
       tempSelectedId: tempSelectedId === id ? null : tempSelectedId,
-      pillPanelHovered: false,
     });
     if (
       removed?.status === "done" &&

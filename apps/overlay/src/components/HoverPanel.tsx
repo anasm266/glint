@@ -3,10 +3,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useState } from "react";
 import type { ActivityEntryDTO, PanelSide, SessionDTO } from "../types";
-import {
-  cancelScheduledHoverLeave,
-  scheduleHoverLeaveClear,
-} from "../lib/hoverLeaveDebounce";
 import { useSessions } from "../store/sessions";
 
 const appLabel: Record<SessionDTO["app"], string> = {
@@ -106,13 +102,16 @@ const activityExit = {
 export default function HoverPanel({
   session,
   panelSide,
+  onMouseEnter,
+  onMouseLeave,
 }: {
   session: SessionDTO | null;
   panelSide: PanelSide;
+  onMouseEnter: () => void;
+  onMouseLeave: () => void;
 }) {
   const panelAbove = panelSide === "above";
   const [now, setNow] = useState(() => Date.now());
-  const setPillPanelHovered = useSessions((s) => s.setPillPanelHovered);
 
   useEffect(() => {
     const id = window.setInterval(() => setNow(Date.now()), 1000);
@@ -122,7 +121,7 @@ export default function HoverPanel({
   return (
     <div
       className={clsx(
-        "flex min-h-0 flex-1 flex-col px-1.5 pb-1.5 pt-1",
+        "flex h-full min-h-0 flex-col px-1.5 pb-1.5 pt-1",
         session ? "pointer-events-auto" : "pointer-events-none"
       )}
       aria-hidden={!session}
@@ -141,13 +140,8 @@ export default function HoverPanel({
               "surface flex flex-col gap-2.5 overflow-hidden rounded-surface px-3 py-3 will-change-transform",
               panelAbove && "mt-auto"
             )}
-            onMouseEnter={() => {
-              cancelScheduledHoverLeave();
-              setPillPanelHovered(true);
-            }}
-            onMouseLeave={() => {
-              scheduleHoverLeaveClear();
-            }}
+            onMouseEnter={onMouseEnter}
+            onMouseLeave={onMouseLeave}
           >
             <motion.div
               variants={panelContentVariants}
