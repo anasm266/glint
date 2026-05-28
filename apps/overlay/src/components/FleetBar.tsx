@@ -1,9 +1,7 @@
 import clsx from "clsx";
 import { motion, AnimatePresence } from "framer-motion";
-import { useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { SessionDTO, Status } from "../types";
-import { cancelScheduledHoverLeave } from "../lib/hoverLeaveDebounce";
 import { useSessions } from "../store/sessions";
 
 const dotColor: Record<Status, string> = {
@@ -28,13 +26,6 @@ export default function FleetBar({
 }) {
   const tempSelectedId = useSessions((s) => s.tempSelectedId);
   const tempSelect = useSessions((s) => s.tempSelect);
-
-  useEffect(
-    () => () => {
-      cancelScheduledHoverLeave();
-    },
-    []
-  );
 
   const visible = sessions.slice(0, 8);
   const overflow = Math.max(0, sessions.length - visible.length);
