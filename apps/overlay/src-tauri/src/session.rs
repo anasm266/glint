@@ -601,6 +601,26 @@ fn detect_app(p: &serde_json::Value) -> App {
     }
 }
 
+fn claude_session_start_is_passive(p: &serde_json::Value) -> bool {
+    matches!(
+        p.get("source").and_then(|v| v.as_str()),
+        Some("resume") | Some("clear") | Some("compact")
+    )
+}
+
+fn apply_claude_pending(entry: &mut Session, pending: crate::state::ClaudePendingStart) {
+    if entry.cwd.is_empty() && !pending.cwd.is_empty() {
+        entry.cwd = pending.cwd.clone();
+        entry.project = project_basename(&pending.cwd);
+    }
+    if entry.model.is_empty() && !pending.model.is_empty() {
+        entry.model = pending.model;
+    }
+    if entry.parent_pid.is_none() {
+        entry.parent_pid = pending.parent_pid;
+    }
+}
+
 fn turn_id_from_payload(p: &serde_json::Value) -> &str {
     p.get("turn_id")
         .or_else(|| p.get("generation_id"))
@@ -718,6 +738,24 @@ pub fn apply(
     let app = detect_app(p);
     let event = resolve_event_name(&raw.event, p);
 
+    let is_new = !map.contains_key(&session_id);
+
+    // Claude fires SessionStart on resume/browse — defer tracking until real work starts.
+    if app == App::Claude && event == "SessionStart" && is_new {
+        let model = p
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        routing.store_claude_pending(&session_id, cwd.clone(), model, raw.parent_pid, raw.ts);
+        return None;
+    }
+
+    if app == App::Claude && event == "SessionEnd" && is_new {
+        routing.clear_claude_pending(&session_id);
+        return None;
+    }
+
     let entry = map.entry(session_id.clone()).or_insert_with(|| {
         Session::new(
             session_id.clone(),
@@ -727,6 +765,12 @@ pub fn apply(
             raw.ts,
         )
     });
+
+    if is_new {
+        if let Some(pending) = routing.take_claude_pending(&session_id) {
+            apply_claude_pending(entry, pending);
+        }
+    }
 
     if entry.cwd.is_empty() && !cwd.is_empty() {
         entry.cwd = cwd.clone();
@@ -743,20 +787,32 @@ pub fn apply(
 
     match event.as_str() {
         "SessionStart" => {
-            entry.turn_finished = false;
-            entry.status = Status::Working;
-            entry.current_action = "Thinking…".to_string();
-            entry.acknowledged_done = false;
-            entry.started_at_ms = raw.ts;
-            entry.last_prompt = String::new();
-            entry.recent_activity.clear();
-            entry.next_activity_seq = 0;
-            entry.turn_activity_entries.clear();
-            entry.turn_activity_turn_id.clear();
-            entry.done_summary = None;
-            entry.active_subagent_count = 0;
-            entry.active_child_conversations.clear();
-            entry.pending_stop = None;
+            if entry.app == App::Claude && claude_session_start_is_passive(p) {
+                if let Some(model) = p.get("model").and_then(|v| v.as_str()) {
+                    if !model.is_empty() {
+                        entry.model = model.to_string();
+                    }
+                }
+                if !cwd.is_empty() {
+                    entry.cwd = cwd.clone();
+                    entry.project = project_basename(&cwd);
+                }
+            } else {
+                entry.turn_finished = false;
+                entry.status = Status::Working;
+                entry.current_action = "Thinking…".to_string();
+                entry.acknowledged_done = false;
+                entry.started_at_ms = raw.ts;
+                entry.last_prompt = String::new();
+                entry.recent_activity.clear();
+                entry.next_activity_seq = 0;
+                entry.turn_activity_entries.clear();
+                entry.turn_activity_turn_id.clear();
+                entry.done_summary = None;
+                entry.active_subagent_count = 0;
+                entry.active_child_conversations.clear();
+                entry.pending_stop = None;
+            }
         }
         "UserPromptSubmit" => {
             entry.turn_finished = false;
@@ -908,6 +964,7 @@ pub fn apply(
             let _ = try_complete_pending_stop(routing, entry, raw.ts);
         }
         "SessionEnd" => {
+            routing.clear_claude_pending(&session_id);
             let flush_tid = entry.turn_activity_turn_id.clone();
             entry.flush_turn_activity(raw.ts, flush_tid.as_str());
             if raw_conv != session_id {
@@ -2526,7 +2583,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_post_edit_tracks_files() {
+    fn claude_session_start_resume_does_not_create_session() {
         let mut map = HashMap::new();
         let mut routing = SessionRouting::default();
         apply(
@@ -2535,8 +2592,53 @@ mod tests {
             RawEvent {
                 event: "SessionStart".to_string(),
                 payload: serde_json::json!({
+                    "session_id": "c-resume",
+                    "transcript_path": "C:/Users/me/.claude/projects/foo/session.jsonl",
+                    "source": "resume",
+                    "cwd": "C:/Users/me/proj"
+                }),
+                ts: 1,
+                hook_pid: None,
+                parent_pid: None,
+            },
+        );
+        assert!(map.is_empty());
+
+        apply(
+            &mut map,
+            &mut routing,
+            RawEvent {
+                event: "UserPromptSubmit".to_string(),
+                payload: serde_json::json!({
+                    "session_id": "c-resume",
+                    "transcript_path": "C:/Users/me/.claude/projects/foo/session.jsonl",
+                    "prompt": "hello",
+                    "cwd": "C:/Users/me/proj"
+                }),
+                ts: 2,
+                hook_pid: None,
+                parent_pid: None,
+            },
+        );
+        let s = map.get("c-resume").unwrap();
+        assert_eq!(s.app, App::Claude);
+        assert_eq!(s.last_prompt, "hello");
+        assert_eq!(s.status, Status::Working);
+    }
+
+    #[test]
+    fn claude_post_edit_tracks_files() {
+        let mut map = HashMap::new();
+        let mut routing = SessionRouting::default();
+        apply(
+            &mut map,
+            &mut routing,
+            RawEvent {
+                event: "UserPromptSubmit".to_string(),
+                payload: serde_json::json!({
                     "session_id": "c1",
                     "transcript_path": "C:/Users/me/.claude/projects/foo/session.jsonl",
+                    "prompt": "edit main.rs",
                     "model": "claude-sonnet-4"
                 }),
                 ts: 1,
