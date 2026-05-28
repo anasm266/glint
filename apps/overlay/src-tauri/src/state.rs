@@ -20,6 +20,16 @@ pub struct SessionRouting {
     pub spawn_window_until_ms: HashMap<String, u64>,
     /// Last rollup event timestamp per child conversation id.
     pub child_last_event_ms: HashMap<String, u64>,
+    /// Claude SessionStart metadata held until the user submits a prompt or a tool runs.
+    pub claude_pending: HashMap<String, ClaudePendingStart>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ClaudePendingStart {
+    pub cwd: String,
+    pub model: String,
+    pub parent_pid: Option<u32>,
+    pub ts: u64,
 }
 
 impl SessionRouting {
@@ -128,6 +138,36 @@ impl SessionRouting {
             .filter(|(_, p)| p.as_str() == parent_id)
             .filter(|(child, _)| sessions.contains_key(child.as_str()))
             .count()
+    }
+
+    pub fn store_claude_pending(
+        &mut self,
+        id: &str,
+        cwd: String,
+        model: String,
+        parent_pid: Option<u32>,
+        ts: u64,
+    ) {
+        const MAX_AGE_MS: u64 = 300_000;
+        self.claude_pending
+            .retain(|_, v| ts.saturating_sub(v.ts) < MAX_AGE_MS);
+        self.claude_pending.insert(
+            id.to_string(),
+            ClaudePendingStart {
+                cwd,
+                model,
+                parent_pid,
+                ts,
+            },
+        );
+    }
+
+    pub fn take_claude_pending(&mut self, id: &str) -> Option<ClaudePendingStart> {
+        self.claude_pending.remove(id)
+    }
+
+    pub fn clear_claude_pending(&mut self, id: &str) {
+        self.claude_pending.remove(id);
     }
 }
 
