@@ -143,8 +143,8 @@ pub(crate) fn open_or_focus_settings(app: &tauri::AppHandle) {
         "settings",
         WebviewUrl::App("settings.html".into()),
     )
-    .title("overlay-app · settings")
-    .inner_size(440.0, 480.0)
+    .title("Glint Settings")
+    .inner_size(520.0, 600.0)
     .resizable(false)
     .decorations(true)
     .transparent(false)
