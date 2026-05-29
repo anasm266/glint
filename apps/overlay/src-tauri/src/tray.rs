@@ -6,13 +6,13 @@ use tauri::{
 
 pub fn install(app: &AppHandle) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "Show overlay", true, None::<&str>)?;
-    let settings = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
+    let settings = MenuItem::with_id(app, "settings", "Settings...", true, None::<&str>)?;
     let sep = tauri::menu::PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &settings, &sep, &quit])?;
 
     let _tray = TrayIconBuilder::with_id("main-tray")
-        .tooltip("overlay-app")
+        .tooltip("Glint")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
