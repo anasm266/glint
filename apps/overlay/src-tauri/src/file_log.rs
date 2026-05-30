@@ -99,7 +99,7 @@ fn extract_ai_tool(p: &Value) -> Value {
         .unwrap_or("");
     let input = p.get("tool_input");
     match tool {
-        "Shell" | "Bash" => {
+        "Shell" | "Bash" | "PowerShell" => {
             let cmd = input
                 .and_then(|v| v.get("command"))
                 .and_then(|v| v.as_str())
@@ -158,7 +158,7 @@ fn extract_post_tool_result(p: &Value) -> Value {
         "tool": tool,
         "response_preview": trunc(&response, MAX_LOG_STR),
     });
-    if tool == "Shell" || tool == "Bash" {
+    if tool == "Shell" || tool == "Bash" || tool == "PowerShell" {
         if let Ok(v) = serde_json::from_str::<Value>(&response) {
             if let Some(code) = v.get("exitCode").and_then(|c| c.as_i64()) {
                 out["exit_code"] = json!(code);
@@ -430,5 +430,17 @@ mod tests {
         let v = extract_ai_tool(&p);
         assert_eq!(v["tool"], "Shell");
         assert_eq!(v["command"], "git status");
+    }
+
+    #[test]
+    fn extract_ai_tool_powershell() {
+        let p = json!({
+            "tool_name": "PowerShell",
+            "tool_input": { "command": "Get-ChildItem -Recurse", "cwd": "C:\\proj" }
+        });
+        let v = extract_ai_tool(&p);
+        assert_eq!(v["tool"], "PowerShell");
+        assert_eq!(v["command"], "Get-ChildItem -Recurse");
+        assert_eq!(v["cwd"], "C:\\proj");
     }
 }

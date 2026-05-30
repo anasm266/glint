@@ -844,7 +844,7 @@ pub fn apply(
             if task_run_in_background(p) {
                 routing.note_task_spawn(&session_id, raw.ts);
             }
-            if tool == "Bash" || tool == "Shell" {
+            if tool == "Bash" || tool == "Shell" || tool == "PowerShell" {
                 let cmd = p
                     .get("tool_input")
                     .and_then(|v| v.get("command"))
@@ -859,7 +859,7 @@ pub fn apply(
                 entry.flush_turn_activity(raw.ts, flush_tid.as_str());
             }
             if !action.is_empty() {
-                let dedupe_key = if tool == "Bash" || tool == "Shell" {
+                let dedupe_key = if tool == "Bash" || tool == "Shell" || tool == "PowerShell" {
                     activity_dedupe_key(&entry.last_bash_command)
                 } else {
                     action.clone()
@@ -891,7 +891,7 @@ pub fn apply(
             track_files_from_post(entry, p);
             let tool = p.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
             let response = tool_response_str(p);
-            if tool == "Bash" || tool == "Shell" {
+            if tool == "Bash" || tool == "Shell" || tool == "PowerShell" {
                 parse_gh_pr_post(entry, &response, raw.ts);
                 parse_gh_issue_post(entry, &response, raw.ts);
                 parse_rg_post(entry, &response, raw.ts);
@@ -1147,7 +1147,7 @@ fn describe_pre_tool(p: &serde_json::Value) -> String {
     let input = p.get("tool_input");
 
     match tool {
-        "Bash" | "Shell" => {
+        "Bash" | "Shell" | "PowerShell" => {
             let cmd = input
                 .and_then(|v| v.get("command"))
                 .and_then(|v| v.as_str())
@@ -2435,6 +2435,18 @@ mod tests {
     fn describe_bash_get_content_line_range() {
         assert_eq!(
             describe_bash("Get-Content foo.ts -Skip 680 -First 260"),
+            "Reading lines 681–940 of foo.ts"
+        );
+    }
+
+    #[test]
+    fn describe_pre_tool_powershell_get_content() {
+        let p = serde_json::json!({
+            "tool_name": "PowerShell",
+            "tool_input": { "command": "Get-Content foo.ts -Skip 680 -First 260" }
+        });
+        assert_eq!(
+            describe_pre_tool(&p),
             "Reading lines 681–940 of foo.ts"
         );
     }
