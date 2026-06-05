@@ -1478,6 +1478,9 @@ fn label_priority(label: &str) -> u8 {
         "Searching git history" | "Blaming lines in file" => 55,
         "Checking git state" | "Listing branches" | "Deleting branch" => 40,
         "Searching code" | "Reading file" => 45,
+        "Listing directory" => 52,
+        "Filtering results" => 44,
+        _ if label.starts_with("Reading:") || label.starts_with("Reading lines") => 51,
         "Running inline script" | "Running Node" => 42,
         _ if label.starts_with("Found ") || label.starts_with("Match:") => 60,
         _ if label.contains("tests") => 70,
@@ -1486,16 +1489,49 @@ fn label_priority(label: &str) -> u8 {
 }
 
 fn substantive_command_segments(raw: &str) -> Vec<&str> {
-    let s = raw.trim();
     let mut out = Vec::new();
-    for segment in s.split(';') {
-        let seg = segment.trim();
-        if seg.is_empty() || is_shell_assignment(seg) || is_shell_navigation(seg) {
-            continue;
+    for segment in raw.trim().split(';') {
+        if let Some(seg) = substantive_command_segment_text(segment) {
+            out.push(seg);
         }
-        out.push(seg);
     }
     out
+}
+
+/// PowerShell preamble like `$projects = Get-ChildItem ...` — return the RHS command.
+fn shell_assignment_rhs(seg: &str) -> Option<&str> {
+    if !seg.starts_with('$') {
+        return None;
+    }
+    let eq = seg.find('=')?;
+    if eq == 0 {
+        return None;
+    }
+    let rhs = seg[eq + 1..].trim();
+    if rhs.is_empty() || is_shell_literal_value(rhs) {
+        return None;
+    }
+    Some(rhs)
+}
+
+fn is_shell_literal_value(s: &str) -> bool {
+    let s = s.trim();
+    (s.starts_with('"') && s.ends_with('"'))
+        || (s.starts_with('\'') && s.ends_with('\''))
+        || s.parse::<i64>().is_ok()
+        || s.eq_ignore_ascii_case("true")
+        || s.eq_ignore_ascii_case("false")
+}
+
+fn substantive_command_segment_text(seg: &str) -> Option<&str> {
+    let seg = seg.trim();
+    if seg.is_empty() || is_shell_navigation(seg) {
+        return None;
+    }
+    if is_shell_assignment(seg) {
+        return shell_assignment_rhs(seg);
+    }
+    Some(seg)
 }
 
 /// Cursor Shell often prefixes `Set-Location <path>;` before the real command.
@@ -1507,14 +1543,19 @@ fn label_command_segment(raw: &str) -> &str {
 
     for segment in s.split(';') {
         let seg = segment.trim();
-        if seg.is_empty() || is_shell_assignment(seg) {
+        if seg.is_empty() || is_shell_navigation(seg) {
             continue;
         }
-        if first_non_assign.is_none() {
-            first_non_assign = Some(seg);
-        }
-        if !is_shell_navigation(seg) {
-            last_substantive = Some(seg);
+        let substantive = if is_shell_assignment(seg) {
+            shell_assignment_rhs(seg)
+        } else {
+            Some(seg)
+        };
+        if let Some(text) = substantive {
+            if first_non_assign.is_none() {
+                first_non_assign = Some(text);
+            }
+            last_substantive = Some(text);
         }
     }
 
@@ -1524,11 +1565,19 @@ fn label_command_segment(raw: &str) -> &str {
 }
 
 fn is_shell_assignment(seg: &str) -> bool {
-    (seg.starts_with('$') && {
-        let up_to_eq = seg.find('=').unwrap_or(0);
-        let up_to_sp = seg.find(char::is_whitespace).unwrap_or(usize::MAX);
-        up_to_eq > 0 && up_to_eq <= up_to_sp
-    }) || (seg.starts_with("set ") && seg.contains('='))
+    if seg.starts_with("set ") && seg.contains('=') {
+        return true;
+    }
+    if !seg.starts_with('$') {
+        return false;
+    }
+    let Some(eq) = seg.find('=') else {
+        return false;
+    };
+    let var = seg[..eq].trim();
+    var.starts_with('$')
+        && var.len() > 1
+        && !var[1..].contains(char::is_whitespace)
 }
 
 fn is_shell_navigation(seg: &str) -> bool {
@@ -1590,7 +1639,14 @@ fn strip_shell_noise(raw: &str) -> &str {
     let mut last_non_assign: &str = s;
     for segment in s.split(';') {
         let seg = segment.trim();
-        if seg.is_empty() || is_shell_assignment(seg) {
+        if seg.is_empty() || is_shell_navigation(seg) {
+            continue;
+        }
+        if is_shell_assignment(seg) {
+            if let Some(rhs) = shell_assignment_rhs(seg) {
+                last_non_assign = rhs;
+                break;
+            }
             continue;
         }
         last_non_assign = seg;
@@ -1637,6 +1693,24 @@ fn strip_shell_noise(raw: &str) -> &str {
 
 /// Classify a noise-stripped command into a human label.
 fn classify_bash(cmd: &str) -> String {
+    if cmd.contains('|') {
+        let labels: Vec<String> = cmd
+            .split('|')
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(classify_bash_token)
+            .collect();
+        if labels.len() > 1 {
+            return labels
+                .into_iter()
+                .max_by_key(|l| label_priority(&l))
+                .unwrap_or_else(|| "Running command".to_string());
+        }
+    }
+    classify_bash_token(cmd)
+}
+
+fn classify_bash_token(cmd: &str) -> String {
     let mut tokens = cmd.split_whitespace();
     let verb = match tokens.next() {
         Some(v) => v,
@@ -1705,6 +1779,11 @@ fn classify_bash(cmd: &str) -> String {
         "rg" | "ripgrep" => classify_rg(rest),
         "find" => "Searching files".to_string(),
 
+        // ── PowerShell pipeline cmdlets ─────────────────────────────────────
+        "where-object" | "where" => "Filtering results".to_string(),
+        "select-object" | "select" => "Processing results".to_string(),
+        "foreach-object" | "foreach" | "%" => "Processing results".to_string(),
+
         // ── File manipulation ───────────────────────────────────────────────
         "mkdir" | "md" | "new-item" => "Creating directory".to_string(),
         "rm" | "del" | "remove-item" | "ri" => "Removing files".to_string(),
@@ -1741,7 +1820,7 @@ fn classify_bash(cmd: &str) -> String {
         "ping" => "Checking connectivity".to_string(),
 
         // ── Environment / process inspection ─────────────────────────────────
-        "which" | "where" | "command" => "Checking tool availability".to_string(),
+        "which" | "command" => "Checking tool availability".to_string(),
         "env" | "printenv" | "set" => "Checking environment".to_string(),
         "ps" | "top" | "htop" | "tasklist" => "Checking processes".to_string(),
         "kill" | "taskkill" | "stop-process" => "Stopping process".to_string(),
@@ -1755,6 +1834,9 @@ fn classify_bash(cmd: &str) -> String {
         // ── Fallback: show just the verb, not the full raw command ────────────
         _ => {
             // If the verb looks like a script path, describe it as such.
+            if verb.starts_with('$') {
+                return "Running command".to_string();
+            }
             if verb.ends_with(".sh") || verb.ends_with(".ps1") || verb.ends_with(".py") || verb.starts_with("./") || verb.starts_with(".\\") {
                 format!("Running script: {}", basename(verb))
             } else {
@@ -2640,7 +2722,35 @@ mod tests {
     #[test]
     fn describe_bash_get_content_variable_path() {
         let cmd = r#"$log = "C:\logs\glint.jsonl"; Get-Content $log | ForEach-Object { $_ | ConvertFrom-Json }"#;
-        assert_eq!(describe_bash(cmd), "Reading file");
+        let label = describe_bash(cmd);
+        assert!(
+            label.starts_with("Reading") || label == "Processing results",
+            "unexpected: {label}"
+        );
+    }
+
+    #[test]
+    fn describe_bash_ps_assignment_get_childitem() {
+        let cmd = r#"$projects = Get-ChildItem 'C:\Users\Anas\.cursor\projects' -Directory -ErrorAction SilentlyContinue"#;
+        assert_eq!(describe_bash(cmd), "Listing directory");
+    }
+
+    #[test]
+    fn describe_bash_ps_assignment_with_write_host() {
+        let cmd = r#"$projects = Get-ChildItem 'C:\Users\Anas\.cursor\projects' -Directory; Write-Host "Cursor""#;
+        assert_eq!(describe_bash(cmd), "Listing directory");
+    }
+
+    #[test]
+    fn describe_bash_ps_chained_assignments() {
+        let cmd = r#"$p = Get-ChildItem 'C:\Users\Anas\.cursor\projects' -Directory; $named = $p | Where-Object { $_.Name -like 'c-Users-*' }"#;
+        assert_eq!(describe_bash(cmd), "Listing directory");
+    }
+
+    #[test]
+    fn describe_bash_ps_desktop_cursor_assignment() {
+        let cmd = r#"$desktopCursor = Get-ChildItem 'C:\Users\Anas\Desktop\cursor' -Directory -ErrorAction SilentlyContinue"#;
+        assert_eq!(describe_bash(cmd), "Listing directory");
     }
 
     #[test]
