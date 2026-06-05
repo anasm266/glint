@@ -158,7 +158,9 @@ fn extract_post_tool_result(p: &Value) -> Value {
         "tool": tool,
         "response_preview": trunc(&response, MAX_LOG_STR),
     });
-    if tool == "Shell" || tool == "Bash" || tool == "PowerShell" {
+    if let Some(code) = session::tool_response_exit_code_pub(p) {
+        out["exit_code"] = json!(code);
+    } else if tool == "Shell" || tool == "Bash" || tool == "PowerShell" {
         if let Ok(v) = serde_json::from_str::<Value>(&response) {
             if let Some(code) = v.get("exitCode").and_then(|c| c.as_i64()) {
                 out["exit_code"] = json!(code);
@@ -442,5 +444,49 @@ mod tests {
         assert_eq!(v["tool"], "PowerShell");
         assert_eq!(v["command"], "Get-ChildItem -Recurse");
         assert_eq!(v["cwd"], "C:\\proj");
+    }
+
+    #[test]
+    fn extract_post_tool_result_claude_bash_object() {
+        let p = json!({
+            "tool_name": "Bash",
+            "tool_response": {
+                "stdout": "HeartHealthSystem",
+                "stderr": "",
+                "interrupted": false
+            }
+        });
+        let v = extract_post_tool_result(&p);
+        assert_eq!(v["tool"], "Bash");
+        assert_eq!(v["response_preview"], "HeartHealthSystem");
+    }
+
+    #[test]
+    fn extract_post_tool_result_claude_glob_object() {
+        let p = json!({
+            "tool_name": "Glob",
+            "tool_response": {
+                "filenames": ["src/Main.java"],
+                "numFiles": 1,
+                "durationMs": 8
+            }
+        });
+        let v = extract_post_tool_result(&p);
+        assert_eq!(v["tool"], "Glob");
+        assert_eq!(v["response_preview"], "src/Main.java");
+    }
+
+    #[test]
+    fn extract_post_tool_result_cursor_shell_exit_code() {
+        let p = json!({
+            "tool_name": "Shell",
+            "tool_response": {
+                "output": "done",
+                "exitCode": 0
+            }
+        });
+        let v = extract_post_tool_result(&p);
+        assert_eq!(v["response_preview"], "done");
+        assert_eq!(v["exit_code"], 0);
     }
 }

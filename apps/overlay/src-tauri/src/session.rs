@@ -455,16 +455,27 @@ fn track_child_activity(
     entry.active_child_conversations.insert(child_id.to_string());
 }
 
+fn is_subagent_placeholder(action: &str) -> bool {
+    action.is_empty()
+        || action == "Thinking…"
+        || action == "Subagents finishing…"
+        || action.ends_with(" subagents running")
+}
+
 fn refresh_action_label(entry: &mut Session) {
     if entry.status == Status::Done || entry.status == Status::Errored {
         return;
     }
     if entry.active_subagent_count > 0 {
-        entry.current_action = format!("{} subagents running", entry.active_subagent_count);
+        if is_subagent_placeholder(&entry.current_action) {
+            entry.current_action = format!("{} subagents running", entry.active_subagent_count);
+        }
         return;
     }
     if !entry.active_child_conversations.is_empty() {
-        entry.current_action = "Subagents finishing…".to_string();
+        if is_subagent_placeholder(&entry.current_action) {
+            entry.current_action = "Subagents finishing…".to_string();
+        }
         return;
     }
     if entry.current_action != "Thinking…" && !entry.current_action.is_empty() {
@@ -632,13 +643,95 @@ pub(crate) fn tool_response_str_pub(p: &serde_json::Value) -> String {
     tool_response_str(p)
 }
 
+pub(crate) fn tool_response_exit_code_pub(p: &serde_json::Value) -> Option<i64> {
+    tool_response_exit_code(p)
+}
+
 fn tool_response_str(p: &serde_json::Value) -> String {
-    let raw = p
-        .get("tool_response")
-        .and_then(|v| v.as_str())
-        .or_else(|| p.get("tool_output").and_then(|v| v.as_str()))
-        .unwrap_or("");
-    unwrap_shell_response(raw)
+    let Some(raw) = p.get("tool_response").or_else(|| p.get("tool_output")) else {
+        return String::new();
+    };
+    match raw {
+        serde_json::Value::String(s) => unwrap_shell_response(s),
+        serde_json::Value::Object(obj) => stringify_tool_response_object(obj),
+        _ => String::new(),
+    }
+}
+
+fn tool_response_exit_code(p: &serde_json::Value) -> Option<i64> {
+    let raw = p.get("tool_response").or_else(|| p.get("tool_output"))?;
+    if let Some(obj) = raw.as_object() {
+        return obj
+            .get("exitCode")
+            .or_else(|| obj.get("exit_code"))
+            .and_then(|c| c.as_i64());
+    }
+    let s = raw.as_str()?;
+    let trimmed = s.trim();
+    if !trimmed.starts_with('{') {
+        return None;
+    }
+    serde_json::from_str::<serde_json::Value>(trimmed)
+        .ok()?
+        .get("exitCode")
+        .and_then(|c| c.as_i64())
+}
+
+/// Claude hooks send `tool_response` as an object (`stdout`, `filenames`, …).
+fn stringify_tool_response_object(obj: &serde_json::Map<String, serde_json::Value>) -> String {
+    let stdout = obj.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
+    let stderr = obj.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
+    if !stdout.is_empty() || !stderr.is_empty() {
+        if stderr.is_empty() {
+            return stdout.to_string();
+        }
+        if stdout.is_empty() {
+            return stderr.to_string();
+        }
+        return format!("{stdout}\n{stderr}");
+    }
+
+    if let Some(s) = obj.get("output").and_then(|v| v.as_str()) {
+        return unwrap_shell_response(s);
+    }
+
+    for key in ["content", "text", "result", "message", "data"] {
+        if let Some(s) = obj.get(key).and_then(|v| v.as_str()) {
+            if !s.is_empty() {
+                return s.to_string();
+            }
+        }
+    }
+
+    if let Some(files) = obj.get("filenames").and_then(|v| v.as_array()) {
+        let names: Vec<&str> = files.iter().filter_map(|v| v.as_str()).collect();
+        if !names.is_empty() {
+            return names.join("\n");
+        }
+        if let Some(n) = obj.get("numFiles").and_then(|v| v.as_u64()) {
+            return format!("{n} files matched");
+        }
+    }
+
+    if let Some(n) = obj.get("numFiles").and_then(|v| v.as_u64()) {
+        return format!("{n} files matched");
+    }
+
+    if obj.keys().all(|k| {
+        matches!(
+            k.as_str(),
+            "interrupted"
+                | "isImage"
+                | "noOutputExpected"
+                | "durationMs"
+                | "duration_ms"
+                | "truncated"
+        )
+    }) {
+        return String::new();
+    }
+
+    serde_json::to_string(&serde_json::Value::Object(obj.clone())).unwrap_or_default()
 }
 
 fn path_from_tool_input(input: Option<&serde_json::Value>) -> Option<String> {
@@ -1185,6 +1278,8 @@ fn describe_pre_tool(p: &serde_json::Value) -> String {
                 None => "Editing files".to_string(),
             }
         }
+        "Glob" => describe_glob(input),
+        "Grep" | "SemanticSearch" => describe_grep(input),
         other => {
             // Generic / MCP tool. Show humanized name.
             format!("Calling tool: {}", humanize_tool(other))
@@ -1304,6 +1399,47 @@ fn humanize_tool(name: &str) -> String {
         return rest.replace("__", " · ");
     }
     name.to_string()
+}
+
+fn tool_input_str<'a>(input: Option<&'a serde_json::Value>, keys: &[&str]) -> Option<&'a str> {
+    let obj = input?.as_object()?;
+    for key in keys {
+        if let Some(s) = obj.get(*key).and_then(|v| v.as_str()) {
+            if !s.is_empty() {
+                return Some(s);
+            }
+        }
+    }
+    None
+}
+
+fn describe_glob(input: Option<&serde_json::Value>) -> String {
+    let pattern = tool_input_str(input, &["glob", "pattern"]).unwrap_or("");
+    if pattern.is_empty() {
+        "Searching files".to_string()
+    } else {
+        format!("Searching: {}", truncate(pattern, 48))
+    }
+}
+
+fn describe_grep(input: Option<&serde_json::Value>) -> String {
+    let pattern = tool_input_str(input, &["pattern"]).unwrap_or("");
+    let path = tool_input_str(input, &["path", "file_path"]);
+    if !pattern.is_empty() {
+        if let Some(p) = path {
+            format!(
+                "Searching: {} in {}",
+                truncate(pattern, 32),
+                truncate(basename(p), 24)
+            )
+        } else {
+            format!("Searching: {}", truncate(pattern, 48))
+        }
+    } else if let Some(p) = path {
+        format!("Searching {}", truncate(basename(p), 48))
+    } else {
+        "Searching code".to_string()
+    }
 }
 
 // ── Bash command summarizer ──────────────────────────────────────────────────
@@ -2167,14 +2303,35 @@ fn classify_get_content(rest: &str) -> String {
             i += 2;
             continue;
         }
+        if (t == "-path" || t == "-literalpath") && i + 1 < tokens.len() {
+            let candidate = tokens[i + 1].trim_matches('"').trim_matches('\'');
+            if looks_like_path(candidate) {
+                let path = basename(candidate).to_string();
+                return format_get_content_range(&path, skip, first);
+            }
+            i += 2;
+            continue;
+        }
         i += 1;
     }
     let path = tokens
         .iter()
         .rev()
         .find(|t| looks_like_path(t))
-        .map(|p| basename(p).to_string())
-        .unwrap_or_else(|| "file".to_string());
+        .map(|p| basename(p).to_string());
+    match path {
+        Some(path) => format_get_content_range(&path, skip, first),
+        None => {
+            if skip.is_some() || first.is_some() {
+                format_get_content_range("file", skip, first)
+            } else {
+                "Reading file".to_string()
+            }
+        }
+    }
+}
+
+fn format_get_content_range(path: &str, skip: Option<u32>, first: Option<u32>) -> String {
     if let (Some(s), Some(f)) = (skip, first) {
         let start = s + 1;
         let end = s + f;
@@ -2377,13 +2534,19 @@ fn basename(p: &str) -> &str {
 
 /// Heuristic: does this token look like a file/directory path?
 fn looks_like_path(s: &str) -> bool {
-    !s.is_empty()
-        && (s.contains('.')
-            || s.starts_with('/')
-            || s.starts_with('\\')
-            || s.starts_with("..")
-            || s.contains('/')
-            || s.contains('\\'))
+    let s = s.trim().trim_matches('"').trim_matches('\'');
+    if s.is_empty() || s.starts_with('$') || s.starts_with('@') {
+        return false;
+    }
+    if s.contains('$') || s.contains(").") || s.contains("::") {
+        return false;
+    }
+    s.contains('.')
+        || s.starts_with('/')
+        || s.starts_with('\\')
+        || s.starts_with("..")
+        || s.contains('/')
+        || s.contains('\\')
 }
 
 // ── end Bash command summarizer ──────────────────────────────────────────────
@@ -2452,6 +2615,102 @@ mod tests {
     }
 
     #[test]
+    fn describe_pre_tool_glob_pattern() {
+        let p = serde_json::json!({
+            "tool_name": "Glob",
+            "tool_input": { "glob": "**/*.java" }
+        });
+        assert_eq!(describe_pre_tool(&p), "Searching: **/*.java");
+    }
+
+    #[test]
+    fn describe_pre_tool_grep_pattern_and_path() {
+        let p = serde_json::json!({
+            "tool_name": "Grep",
+            "tool_input": {
+                "pattern": "makeHeader|TEAL_HOVER",
+                "path": "src/components/CompactView.tsx"
+            }
+        });
+        let label = describe_pre_tool(&p);
+        assert!(label.contains("makeHeader"));
+        assert!(label.contains("CompactView.tsx"));
+    }
+
+    #[test]
+    fn describe_bash_get_content_variable_path() {
+        let cmd = r#"$log = "C:\logs\glint.jsonl"; Get-Content $log | ForEach-Object { $_ | ConvertFrom-Json }"#;
+        assert_eq!(describe_bash(cmd), "Reading file");
+    }
+
+    #[test]
+    fn describe_bash_get_content_literal_path_flag() {
+        let cmd = r#"Get-Content -Path apps\overlay\src\session.rs -Encoding UTF8"#;
+        assert_eq!(describe_bash(cmd), "Reading: session.rs");
+    }
+
+    #[test]
+    fn child_pre_tool_survives_pending_stop_refresh() {
+        let mut map = HashMap::new();
+        let mut routing = SessionRouting::default();
+        routing.link_child("child-1", "parent-1");
+        apply(
+            &mut map,
+            &mut routing,
+            RawEvent {
+                event: "sessionStart".to_string(),
+                payload: serde_json::json!({
+                    "conversation_id": "parent-1",
+                    "workspace_roots": ["/proj"]
+                }),
+                ts: 1,
+                hook_pid: None,
+                parent_pid: None,
+            },
+        );
+        map.get_mut("parent-1")
+            .unwrap()
+            .active_child_conversations
+            .insert("child-1".to_string());
+        routing.touch_child("child-1", 2);
+        apply(
+            &mut map,
+            &mut routing,
+            RawEvent {
+                event: "stop".to_string(),
+                payload: serde_json::json!({
+                    "conversation_id": "parent-1",
+                    "status": "completed"
+                }),
+                ts: 2,
+                hook_pid: None,
+                parent_pid: None,
+            },
+        );
+        assert_eq!(
+            map.get("parent-1").unwrap().current_action,
+            "Subagents finishing…"
+        );
+        apply(
+            &mut map,
+            &mut routing,
+            RawEvent {
+                event: "preToolUse".to_string(),
+                payload: serde_json::json!({
+                    "conversation_id": "child-1",
+                    "tool_name": "Read",
+                    "tool_input": { "file_path": "src/session.rs" }
+                }),
+                ts: 3,
+                hook_pid: None,
+                parent_pid: None,
+            },
+        );
+        let parent = map.get("parent-1").unwrap();
+        assert_eq!(parent.current_action, "Reading: session.rs");
+    }
+
+    #[test]
     fn describe_bash_rg_basename() {
         assert_eq!(
             describe_bash("rg no-unnecessary-type-assertion src/rules/no-unnecessary-type-assertion.ts"),
@@ -2475,6 +2734,43 @@ mod tests {
     fn unwrap_shell_response_extracts_cursor_json() {
         let raw = "{\"output\":\"## main...origin/main\\n\",\"exitCode\":0}";
         assert_eq!(unwrap_shell_response(raw), "## main...origin/main\n");
+    }
+
+    #[test]
+    fn tool_response_str_claude_bash_stdout_object() {
+        let p = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_response": {
+                "stdout": "HeartHealthSystem",
+                "stderr": "",
+                "interrupted": false
+            }
+        });
+        assert_eq!(tool_response_str_pub(&p), "HeartHealthSystem");
+        assert_eq!(tool_response_exit_code_pub(&p), None);
+    }
+
+    #[test]
+    fn tool_response_str_claude_glob_filenames() {
+        let p = serde_json::json!({
+            "tool_name": "Glob",
+            "tool_response": {
+                "filenames": ["a.java", "b.java"],
+                "numFiles": 2,
+                "durationMs": 12
+            }
+        });
+        assert_eq!(tool_response_str_pub(&p), "a.java\nb.java");
+    }
+
+    #[test]
+    fn tool_response_str_cursor_json_string_unchanged() {
+        let p = serde_json::json!({
+            "tool_name": "Shell",
+            "tool_response": "{\"output\":\"ok\",\"exitCode\":0}"
+        });
+        assert_eq!(tool_response_str_pub(&p), "ok");
+        assert_eq!(tool_response_exit_code_pub(&p), Some(0));
     }
 
     #[test]
@@ -2970,7 +3266,7 @@ mod tests {
         let s = map.get("parent-1").unwrap();
         assert_eq!(s.status, Status::Working);
         assert_eq!(s.active_subagent_count, 1);
-        assert_eq!(s.current_action, "1 subagents running");
+        assert_eq!(s.current_action, "Subagent (explore): scan routes");
     }
 
     #[test]
